@@ -75,15 +75,36 @@ function buildUserIdCriteria(userId) {
 }
 
 async function findFirstUnitMongo(Unit) {
-  const units = await Unit.find()
-    .populate({ path: 'moduleId', populate: { path: 'levelId' } })
-    .lean();
+  const Module = require('../models/Module');
+  const Level = require('../models/Level');
+
+  const [units, modules, levels] = await Promise.all([
+    Unit.find().lean(),
+    Module.find().lean(),
+    Level.find().lean(),
+  ]);
 
   if (units.length === 0) {
     return null;
   }
 
-  units.sort((left, right) => {
+  const levelMap = new Map(levels.map((level) => [String(level._id), level]));
+  const moduleMap = new Map(
+    modules.map((moduleDoc) => [
+      String(moduleDoc._id),
+      {
+        ...moduleDoc,
+        levelId: levelMap.get(String(moduleDoc.levelId)) || null,
+      },
+    ])
+  );
+
+  const hydratedUnits = units.map((unit) => ({
+    ...unit,
+    moduleId: moduleMap.get(String(unit.moduleId)) || null,
+  }));
+
+  hydratedUnits.sort((left, right) => {
     const leftLevelOrder = left.moduleId?.levelId?.orderNum || 0;
     const rightLevelOrder = right.moduleId?.levelId?.orderNum || 0;
     if (leftLevelOrder !== rightLevelOrder) return leftLevelOrder - rightLevelOrder;
@@ -95,7 +116,7 @@ async function findFirstUnitMongo(Unit) {
     return (left.orderNum || 0) - (right.orderNum || 0);
   });
 
-  return units[0];
+  return hydratedUnits[0];
 }
 
 async function findUserByEmailPostgres(email) {

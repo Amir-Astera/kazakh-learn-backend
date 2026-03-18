@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const pool = require('../config/db');
 const adminRepository = require('../repositories/adminRepository');
 const adminMiddleware = require('../middleware/admin');
 
