@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS user_lesson_progress (
   completed BOOLEAN DEFAULT FALSE,
   score INTEGER DEFAULT 0,
   mistakes INTEGER DEFAULT 0,
+  xp_earned INTEGER DEFAULT 0,
   time_spent INTEGER DEFAULT 0,
   completed_at TIMESTAMP,
   UNIQUE(user_id, lesson_id)
@@ -111,8 +112,9 @@ CREATE TABLE IF NOT EXISTS user_quests (
 
 CREATE TABLE IF NOT EXISTS landmarks (
   id SERIAL PRIMARY KEY,
-  unit_id INTEGER REFERENCES units(id) ON DELETE CASCADE UNIQUE,
+  unit_id INTEGER REFERENCES units(id) ON DELETE CASCADE,
   image_url VARCHAR(500) NOT NULL,
   alt_text VARCHAR(300) NOT NULL,
+  position JSONB,
   created_at TIMESTAMP DEFAULT NOW()
 );

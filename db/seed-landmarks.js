@@ -33,8 +33,7 @@ async function seedLandmarks() {
       const unitId = unitRes.rows[0].id;
       await pool.query(
         `INSERT INTO landmarks (unit_id, image_url, alt_text)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (unit_id) DO UPDATE SET image_url=$2, alt_text=$3`,
+         VALUES ($1, $2, $3)`,
         [unitId, `/uploads/landmarks/${file}`, alt]
       );
       console.log(`Привязан: ${alt} → unit_id=${unitId}`);

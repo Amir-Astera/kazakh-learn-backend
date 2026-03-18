@@ -3,7 +3,8 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 
-const pool = require('./config/db');
+const { getDbProvider } = require('./config/dbProvider');
+const { bootstrapDataLayer } = require('./db/bootstrap');
 const authRoutes = require('./routes/auth');
 const moduleRoutes = require('./routes/modules');
 const lessonRoutes = require('./routes/lessons');
@@ -25,26 +26,23 @@ app.use('/api/admin', adminRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Kazakh Learn API is running' });
+  res.json({
+    status: 'ok',
+    message: 'Kazakh Learn API is running',
+    db_provider: getDbProvider(),
+  });
 });
 
 const PORT = process.env.PORT || 5000;
 
-async function ensureRuntimeSchema() {
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE');
-  await pool.query('ALTER TABLE units ADD COLUMN IF NOT EXISTS path_image_url VARCHAR(500)');
-  await pool.query('ALTER TABLE units ADD COLUMN IF NOT EXISTS path_points JSONB');
-  await pool.query('ALTER TABLE units ADD COLUMN IF NOT EXISTS landmark_position JSONB');
-}
-
 async function startServer() {
   try {
-    await ensureRuntimeSchema();
+    const { provider } = await bootstrapDataLayer();
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`Server running on port ${PORT} (${provider})`);
     });
   } catch (error) {
-    console.error('Server startup schema error:', error);
+    console.error('Server startup error:', error);
     process.exit(1);
   }
 }

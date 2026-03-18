@@ -12,12 +12,15 @@ async function seed() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS landmarks (
         id SERIAL PRIMARY KEY,
-        unit_id INTEGER REFERENCES units(id) ON DELETE CASCADE UNIQUE,
+        unit_id INTEGER REFERENCES units(id) ON DELETE CASCADE,
         image_url VARCHAR(500) NOT NULL,
         alt_text VARCHAR(300) NOT NULL,
+        position JSONB,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    await pool.query('ALTER TABLE landmarks DROP CONSTRAINT IF EXISTS landmarks_unit_id_key');
+    await pool.query('ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS position JSONB');
 
     // Clear existing data
     await pool.query('DELETE FROM user_quests');
@@ -108,7 +111,7 @@ async function seed() {
     await pool.query(`
       INSERT INTO lessons (unit_id, title, type, xp_reward, order_num) VALUES
       (2, 'Иә / Жоқ — Да / Нет', 'translation', 10, 1),
-      (2, 'Мен, Сен, Ол — Я, Ты, Он', 'choice', 10, 2),
+      (2, 'Мен, Сен, Ол — Я, Ты, Он', 'grammar', 10, 2),
       (2, 'Бұл не? — Что это?', 'translation', 15, 3),
       (2, 'Негізгі сөздер тесті — Тест', 'sentence', 20, 4)
     `);
@@ -119,7 +122,7 @@ async function seed() {
       (3, 'Менің атым — Моё имя', 'translation', 10, 1),
       (3, 'Сіздің атыңыз кім? — Как вас зовут?', 'choice', 10, 2),
       (3, 'Мен студентпін — Я студент', 'translation', 10, 3),
-      (3, 'Қайдансыз? — Откуда вы?', 'sentence', 15, 4),
+      (3, 'Қайдансыз? — Откуда вы?', 'speaking', 15, 4),
       (3, 'Танысу диалогы — Диалог', 'listening', 20, 5)
     `);
 
@@ -153,8 +156,8 @@ async function seed() {
       (6, 'Аға, Іні — Брат старший, младший', 'choice', 10, 2),
       (6, 'Апа, Сіңлі — Сестра', 'translation', 10, 3),
       (6, 'Ата, Әже — Дедушка, Бабушка', 'choice', 10, 4),
-      (6, 'Менің отбасым — Моя семья', 'sentence', 15, 5),
-      (6, 'Притяжательные окончания', 'translation', 15, 6),
+      (6, 'Менің отбасым — Моя семья', 'sentence', 15, 6),
+      (6, 'Притяжательные окончания', 'grammar', 15, 5),
       (6, 'Рассказ о семье', 'speaking', 20, 7)
     `);
 
@@ -196,7 +199,7 @@ async function seed() {
       INSERT INTO lessons (unit_id, title, type, xp_reward, order_num) VALUES
       (10, 'Үлкен, кіші — Большой, маленький', 'translation', 10, 1),
       (10, 'Түстер — Цвета', 'choice', 10, 2),
-      (10, 'Сын есім — Прилагательные', 'translation', 10, 3),
+      (10, 'Сын есім — Прилагательные', 'grammar', 10, 3),
       (10, 'Адамды сипаттау — Описание человека', 'sentence', 15, 4),
       (10, 'Затты сипаттау — Описание предмета', 'listening', 15, 5),
       (10, 'Сипаттама диалогы — Диалог', 'speaking', 20, 6)
@@ -205,9 +208,9 @@ async function seed() {
     // Unit 11: Sentences (Сөйлемдер) — 5 lessons
     await pool.query(`
       INSERT INTO lessons (unit_id, title, type, xp_reward, order_num) VALUES
-      (11, 'Сұраулы сөйлем — Вопросительные', 'translation', 10, 1),
-      (11, 'Болымсыз сөйлем — Отрицательные', 'choice', 10, 2),
-      (11, 'Жалғаулар — Союзы', 'translation', 15, 3),
+      (11, 'Сұраулы сөйлем — Вопросительные', 'grammar', 10, 1),
+      (11, 'Болымсыз сөйлем — Отрицательные', 'grammar', 10, 2),
+      (11, 'Жалғаулар — Союзы', 'grammar', 15, 3),
       (11, 'Құрмалас сөйлем — Сложные предложения', 'sentence', 15, 4),
       (11, 'Эссе жазу — Написание текста', 'speaking', 20, 5)
     `);
@@ -218,7 +221,7 @@ async function seed() {
     await pool.query(`
       INSERT INTO lessons (unit_id, title, type, xp_reward, order_num) VALUES
       (12, 'Дүкенде — В магазине', 'translation', 10, 1),
-      (12, 'Бағасы қанша? — Сколько стоит?', 'choice', 10, 2),
+      (12, 'Бағасы қанша? — Сколько стоит?', 'grammar', 10, 2),
       (12, 'Киім — Одежда', 'translation', 15, 3),
       (12, 'Базарда — На базаре', 'sentence', 15, 4),
       (12, 'Сауда диалогы — Диалог покупки', 'listening', 20, 5)
@@ -358,10 +361,10 @@ async function seed() {
     // Introductions Lesson 4: Откуда вы? (lesson_id=13)
     await pool.query(`
       INSERT INTO exercises (lesson_id, type, question, options, correct_answer, explanation, order_num) VALUES
-      (13, 'translation', 'Переведите: "Откуда вы?"', '["Сіз қайдансыз?", "Сіз кімсіз?", "Сіз қайда барасыз?", "Сіз не істейсіз?"]', 'Сіз қайдансыз?', 'Қайдансыз — откуда вы', 1),
-      (13, 'translation', 'Как сказать "Я из Алматы"?', '["Мен Алматыданмын", "Мен Алматыдамын", "Мен Алматыға барамын", "Мен Алматыны білемін"]', 'Мен Алматыданмын', '-дан/-ден — окончание "из"', 2),
-      (13, 'choice', 'Что означает "Қала"?', '["Село", "Город", "Страна", "Район"]', 'Город', 'Қала — город', 3),
-      (13, 'choice', 'Как сказать "Казахстан"?', '["Қазақстан", "Казахстан", "Газагыстан", "Хазахстан"]', 'Қазақстан', 'На казахском пишется через Қ', 4)
+      (13, 'speaking', 'Произнесите фразу "Откуда вы?"', NULL, 'Сіз қайдансыз?', 'Қайдансыз — откуда вы', 1),
+      (13, 'speaking', 'Произнесите фразу "Я из Алматы"', NULL, 'Мен Алматыданмын', '-дан/-ден — окончание "из"', 2),
+      (13, 'speaking', 'Произнесите слово "Город"', NULL, 'Қала', 'Қала — город', 3),
+      (13, 'speaking', 'Произнесите слово "Қазақстан"', NULL, 'Қазақстан', 'На казахском пишется через Қ', 4)
     `);
 
     // Introductions Lesson 5: Диалог (lesson_id=14)

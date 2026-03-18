@@ -20,6 +20,51 @@ function removeUploadedFile(fileUrl) {
   if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function normalizeLayoutPoint(point) {
+  if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) {
+    return null;
+  }
+
+  return {
+    x: clamp(Number(point.x), 0, 1),
+    y: clamp(Number(point.y), 0, 1),
+  };
+}
+
+function normalizePathPoints(points) {
+  if (!Array.isArray(points)) return null;
+
+  const normalized = points
+    .map(normalizeLayoutPoint)
+    .filter(Boolean);
+
+  return normalized.length >= 2 ? normalized : null;
+}
+
+function serializeJsonValue(value) {
+  return value == null ? null : JSON.stringify(value);
+}
+
+function normalizeLandmarkLayouts(items) {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map((item) => {
+      const id = Number(item?.id);
+      if (!Number.isInteger(id) || id <= 0) return null;
+
+      return {
+        id,
+        position: normalizeLayoutPoint(item?.position),
+      };
+    })
+    .filter(Boolean);
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'path_image') cb(null, pathMapUploadDir);
@@ -121,10 +166,23 @@ router.delete('/modules/:id', async (req, res) => {
 router.get('/units', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT u.*, m.title as module_title, lm.id as landmark_id, lm.image_url, lm.alt_text
+      `SELECT u.*, m.title as module_title,
+              COALESCE(
+                json_agg(
+                  json_build_object(
+                    'id', lm.id,
+                    'image_url', lm.image_url,
+                    'alt_text', lm.alt_text,
+                    'position', lm.position
+                  )
+                  ORDER BY lm.created_at, lm.id
+                ) FILTER (WHERE lm.id IS NOT NULL),
+                '[]'::json
+              ) as landmarks
        FROM units u
        JOIN modules m ON u.module_id=m.id
        LEFT JOIN landmarks lm ON lm.unit_id=u.id
+       GROUP BY u.id, m.title
        ORDER BY m.order_num, u.order_num`
     );
     res.json(result.rows);
@@ -163,13 +221,32 @@ router.delete('/units/:id', async (req, res) => {
 });
 
 router.put('/units/:id/layout', async (req, res) => {
-  const { path_points, landmark_position } = req.body;
+  const { path_points, landmark_position, landmarks } = req.body;
   try {
+    const normalizedPathPoints = normalizePathPoints(path_points);
+    const normalizedLandmarkPoint = normalizeLayoutPoint(landmark_position);
+    const normalizedLandmarkLayouts = normalizeLandmarkLayouts(landmarks);
     const result = await pool.query(
       'UPDATE units SET path_points=$1, landmark_position=$2 WHERE id=$3 RETURNING *',
-      [path_points || null, landmark_position || null, req.params.id]
+      [serializeJsonValue(normalizedPathPoints), serializeJsonValue(normalizedLandmarkPoint), req.params.id]
     );
-    res.json(result.rows[0]);
+
+    for (const landmark of normalizedLandmarkLayouts) {
+      await pool.query(
+        'UPDATE landmarks SET position=$1 WHERE id=$2 AND unit_id=$3',
+        [serializeJsonValue(landmark.position), landmark.id, req.params.id]
+      );
+    }
+
+    const landmarksResult = await pool.query(
+      'SELECT * FROM landmarks WHERE unit_id=$1 ORDER BY created_at, id',
+      [req.params.id]
+    );
+
+    res.json({
+      ...result.rows[0],
+      landmarks: landmarksResult.rows,
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -203,43 +280,64 @@ router.delete('/units/:id/path-image', async (req, res) => {
 });
 
 // ─── LANDMARKS (attach to unit) ───────────────────────────
-router.post('/units/:id/landmark', upload.single('image'), async (req, res) => {
+router.post('/units/:id/landmarks', upload.single('image'), async (req, res) => {
   const unitId = req.params.id;
-  const { alt_text } = req.body;
+  const altText = String(req.body.alt_text || '').trim();
+
   try {
-    const existing = await pool.query('SELECT id, image_url FROM landmarks WHERE unit_id=$1', [unitId]);
-    if (!req.file) {
-      if (existing.rows.length === 0) return res.status(400).json({ error: 'Файл не загружен' });
-      const result = await pool.query(
-        'UPDATE landmarks SET alt_text=$1 WHERE unit_id=$2 RETURNING *',
-        [alt_text, unitId]
-      );
-      return res.json(result.rows[0]);
-    }
+    if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
+    if (!altText) return res.status(400).json({ error: 'Введите описание достопримечательности' });
 
     const imageUrl = `/uploads/landmarks/${req.file.filename}`;
-    if (existing.rows.length > 0) {
-      removeUploadedFile(existing.rows[0].image_url);
-      const result = await pool.query(
-        'UPDATE landmarks SET image_url=$1, alt_text=$2 WHERE unit_id=$3 RETURNING *',
-        [imageUrl, alt_text, unitId]
-      );
-      return res.json(result.rows[0]);
-    }
     const result = await pool.query(
       'INSERT INTO landmarks (unit_id, image_url, alt_text) VALUES ($1,$2,$3) RETURNING *',
-      [unitId, imageUrl, alt_text]
+      [unitId, imageUrl, altText]
     );
+
     res.status(201).json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    if (req.file) removeUploadedFile(`/uploads/landmarks/${req.file.filename}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-router.delete('/units/:id/landmark', async (req, res) => {
+router.put('/units/:unitId/landmarks/:landmarkId', upload.single('image'), async (req, res) => {
+  const { unitId, landmarkId } = req.params;
+  const altText = String(req.body.alt_text || '').trim();
+
   try {
-    const existing = await pool.query('SELECT image_url FROM landmarks WHERE unit_id=$1', [req.params.id]);
+    const existing = await pool.query(
+      'SELECT * FROM landmarks WHERE id=$1 AND unit_id=$2',
+      [landmarkId, unitId]
+    );
+
+    if (!existing.rows[0]) return res.status(404).json({ error: 'Достопримечательность не найдена' });
+    if (!altText) return res.status(400).json({ error: 'Введите описание достопримечательности' });
+
+    const nextImageUrl = req.file ? `/uploads/landmarks/${req.file.filename}` : existing.rows[0].image_url;
+    if (req.file && existing.rows[0].image_url) removeUploadedFile(existing.rows[0].image_url);
+
+    const result = await pool.query(
+      'UPDATE landmarks SET image_url=$1, alt_text=$2 WHERE id=$3 AND unit_id=$4 RETURNING *',
+      [nextImageUrl, altText, landmarkId, unitId]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (req.file) removeUploadedFile(`/uploads/landmarks/${req.file.filename}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/units/:unitId/landmarks/:landmarkId', async (req, res) => {
+  try {
+    const existing = await pool.query(
+      'SELECT image_url FROM landmarks WHERE id=$1 AND unit_id=$2',
+      [req.params.landmarkId, req.params.unitId]
+    );
     if (existing.rows.length > 0) {
       removeUploadedFile(existing.rows[0].image_url);
-      await pool.query('DELETE FROM landmarks WHERE unit_id=$1', [req.params.id]);
+      await pool.query('DELETE FROM landmarks WHERE id=$1 AND unit_id=$2', [req.params.landmarkId, req.params.unitId]);
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
