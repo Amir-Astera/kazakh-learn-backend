@@ -302,19 +302,33 @@ async function seedMongo() {
     );
 
     const adminHash = await bcrypt.hash('admin123', 10);
-    await User.create({
-      legacyId: 1,
-      email: 'admin@kazakh.kz',
-      passwordHash: adminHash,
-      name: 'Administrator',
-      isAdmin: true,
-      xp: 0,
-      streak: 1,
-      lastActivity: null,
-    });
+    const testUserHash = await bcrypt.hash('123456', 10);
+    await User.insertMany([
+      {
+        legacyId: 1,
+        email: 'admin@kazakh.kz',
+        passwordHash: adminHash,
+        name: 'Administrator',
+        isAdmin: true,
+        xp: 0,
+        streak: 1,
+        lastActivity: null,
+      },
+      {
+        legacyId: 2,
+        email: 'test@test.com',
+        passwordHash: testUserHash,
+        name: 'Test User',
+        isAdmin: false,
+        xp: 0,
+        streak: 1,
+        lastActivity: null,
+      },
+    ]);
 
     console.log('MongoDB seed completed successfully!');
     console.log('Admin credentials: admin@kazakh.kz / admin123');
+    console.log('Test credentials: test@test.com / 123456');
   } catch (error) {
     console.error('MongoDB seed error:', error);
     process.exitCode = 1;

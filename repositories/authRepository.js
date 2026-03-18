@@ -39,6 +39,8 @@ async function getMongoModels() {
   const UserSkill = require('../models/UserSkill');
   const UserQuest = require('../models/UserQuest');
   const UserUnitProgress = require('../models/UserUnitProgress');
+  const Level = require('../models/Level');
+  const Module = require('../models/Module');
   const Unit = require('../models/Unit');
 
   return {
@@ -46,6 +48,8 @@ async function getMongoModels() {
     UserSkill,
     UserQuest,
     UserUnitProgress,
+    Level,
+    Module,
     Unit,
     mongoose: getMongooseModule(),
   };
