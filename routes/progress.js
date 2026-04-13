@@ -3,6 +3,7 @@ const {
   getDashboardData,
   getUserStats,
   getRating,
+  getReviewWordsForUser,
 } = require('../repositories/progressRepository');
 const authMiddleware = require('../middleware/auth');
 
@@ -17,6 +18,17 @@ router.get('/dashboard', authMiddleware, async (req, res) => {
     res.json(dashboard);
   } catch (err) {
     console.error('Dashboard error:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Words from completed lessons (for review / smart reminder)
+router.get('/review-words', authMiddleware, async (req, res) => {
+  try {
+    const words = await getReviewWordsForUser(req.user.id);
+    res.json(words);
+  } catch (err) {
+    console.error('Review words error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });

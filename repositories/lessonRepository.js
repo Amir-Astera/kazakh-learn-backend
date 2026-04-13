@@ -17,6 +17,7 @@ function parseLegacyId(value) {
 async function getMongoModels() {
   const User = require('../models/User');
   const Unit = require('../models/Unit');
+  const Module = require('../models/Module');
   const Lesson = require('../models/Lesson');
   const Exercise = require('../models/Exercise');
   const UserLessonProgress = require('../models/UserLessonProgress');
@@ -27,6 +28,7 @@ async function getMongoModels() {
   return {
     User,
     Unit,
+    Module,
     Lesson,
     Exercise,
     UserLessonProgress,
@@ -115,6 +117,26 @@ function calculateLessonXp(baseXp, score, mistakes) {
   if (score >= 85 && mistakes <= 1) return Math.max(1, Math.round(baseXp * 0.9));
   if (score >= 70 && mistakes <= 3) return Math.max(1, Math.round(baseXp * 0.75));
   return Math.max(1, Math.round(baseXp * 0.6));
+}
+
+let xpCurriculumCache = { at: 0, scale: 1 };
+
+async function getXpCurriculumScale() {
+  const ttlMs = 120000;
+  if (Date.now() - xpCurriculumCache.at < ttlMs && xpCurriculumCache.scale > 0) {
+    return xpCurriculumCache.scale;
+  }
+
+  const { Module, Lesson } = await getMongoModels();
+  const maxMod = await Module.findOne().sort({ requiredXp: -1 }).select('requiredXp').lean();
+  const targetPool = Math.max(520, Number(maxMod?.requiredXp) || 0, 500);
+  const agg = await Lesson.aggregate([
+    { $group: { _id: null, total: { $sum: { $ifNull: ['$xpReward', 0] } } } },
+  ]);
+  const sumBase = Math.max(1, Number(agg[0]?.total) || 1);
+  const scale = targetPool / sumBase;
+  xpCurriculumCache = { at: Date.now(), scale };
+  return scale;
 }
 
 async function findUserByIdentifier(User, userId) {
@@ -320,7 +342,9 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
   const lessonProgressCriteria = buildLinkedCriteria('lessonId', 'legacyLessonId', [lessonDoc._id], [lessonDoc.legacyId]);
   const existingProgress = await UserLessonProgress.findOne(combineCriteria(userCriteria, lessonProgressCriteria)).lean();
 
-  const baseXp = lessonDoc.xpReward || 0;
+  const xpScale = await getXpCurriculumScale();
+  const rawLessonXp = lessonDoc.xpReward || 0;
+  const baseXp = Math.max(5, Math.round(rawLessonXp * xpScale));
   const awardedLessonXp = calculateLessonXp(baseXp, normalizedScore, normalizedMistakes);
   const previousLessonXp = existingProgress?.xpEarned || 0;
   const xpDelta = Math.max(0, awardedLessonXp - previousLessonXp);
@@ -375,9 +399,10 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
     combineCriteria(userCriteria, completedLessonsCriteria, { completed: true })
   );
 
-  const totalLessons = unitDoc.lessonCount || unitLessons.length;
-  const stars = completed >= totalLessons ? 3 : completed >= totalLessons * 0.6 ? 2 : 1;
-  const status = completed >= totalLessons ? 'completed' : 'current';
+  const totalLessons = Math.max(unitLessons.length, unitDoc.lessonCount || 0);
+  const completedCapped = Math.min(completed, totalLessons);
+  const stars = completedCapped >= totalLessons ? 3 : completedCapped >= totalLessons * 0.6 ? 2 : 1;
+  const status = completedCapped >= totalLessons ? 'completed' : 'current';
   const unitProgressCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
 
   await UserUnitProgress.updateOne(
@@ -389,7 +414,7 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
         unitId: unitDoc._id,
         legacyUnitId: unitDoc.legacyId,
         status,
-        completedLessons: completed,
+        completedLessons: completedCapped,
         stars,
       },
     },

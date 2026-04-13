@@ -72,6 +72,8 @@ async function getMongoModels() {
   const UserQuest = require('../models/UserQuest');
   const UserLessonProgress = require('../models/UserLessonProgress');
   const UserUnitProgress = require('../models/UserUnitProgress');
+  const Lesson = require('../models/Lesson');
+  const Exercise = require('../models/Exercise');
 
   return {
     User,
@@ -79,6 +81,9 @@ async function getMongoModels() {
     UserQuest,
     UserLessonProgress,
     UserUnitProgress,
+    Lesson,
+    Exercise,
+    mongoose: getMongooseModule(),
   };
 }
 
@@ -224,6 +229,67 @@ async function getUserStatsMongo(userId) {
   };
 }
 
+async function getReviewWordsForUserMongo(userId) {
+  const { User, UserLessonProgress, Lesson, Exercise, mongoose } = await getMongoModels();
+  const userCriteria = buildUserCriteria(userId);
+  if (!userCriteria) {
+    return { words: [] };
+  }
+
+  const user = await User.findOne(userCriteria).lean();
+  if (!user) {
+    return { words: [] };
+  }
+
+  const relatedUserCriteria = buildLegacyAwareForeignCriteria('userId', 'legacyUserId', [user._id, user.legacyId]) || {};
+  const completed = await UserLessonProgress.find({
+    ...relatedUserCriteria,
+    completed: true,
+  })
+    .select('lessonId legacyLessonId')
+    .lean();
+
+  const mongoIds = [];
+  const legacyIds = [];
+  for (const row of completed) {
+    if (row.lessonId) mongoIds.push(row.lessonId);
+    if (row.legacyLessonId != null) legacyIds.push(row.legacyLessonId);
+  }
+
+  if (legacyIds.length > 0) {
+    const resolved = await Lesson.find({ legacyId: { $in: legacyIds } }).select('_id').lean();
+    for (const lesson of resolved) {
+      mongoIds.push(lesson._id);
+    }
+  }
+
+  const { Types } = mongoose;
+  const uniqueStrings = [...new Set(mongoIds.map((id) => String(id)))];
+  const uniqueLessonIds = uniqueStrings
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+
+  if (uniqueLessonIds.length === 0) {
+    return { words: [] };
+  }
+
+  const exercises = await Exercise.find({
+    lessonId: { $in: uniqueLessonIds },
+    type: { $in: ['speaking', 'translation', 'choice', 'listening'] },
+  })
+    .select('correctAnswer')
+    .lean();
+
+  const out = new Set();
+  for (const ex of exercises) {
+    const text = String(ex.correctAnswer || '').trim();
+    if (!text || text.length > 80) continue;
+    out.add(text);
+  }
+
+  return { words: [...out].slice(0, 100) };
+}
+
 async function getRatingMongo() {
   const { User } = await getMongoModels();
   const users = await User.find({ isAdmin: false })
@@ -251,8 +317,13 @@ async function getRating() {
   return getRatingMongo();
 }
 
+async function getReviewWordsForUser(userId) {
+  return getReviewWordsForUserMongo(userId);
+}
+
 module.exports = {
   getDashboardData,
   getUserStats,
   getRating,
+  getReviewWordsForUser,
 };

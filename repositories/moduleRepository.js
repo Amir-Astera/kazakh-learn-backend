@@ -41,7 +41,12 @@ function serializeModule(moduleDoc, levelDoc) {
   };
 }
 
-function serializeUnit(unitDoc, progressDoc) {
+function serializeUnit(unitDoc, progressDoc, actualLessonCount = 0) {
+  const storedCount = unitDoc.lessonCount || 0;
+  const lesson_count = Math.max(storedCount, actualLessonCount || 0);
+  const rawCompleted = progressDoc?.completedLessons || 0;
+  const completed_lessons = lesson_count > 0 ? Math.min(rawCompleted, lesson_count) : rawCompleted;
+
   return {
     id: unitDoc.legacyId ?? String(unitDoc._id),
     module_id: unitDoc.moduleId?.legacyId ?? String(unitDoc.moduleId?._id || unitDoc.moduleId),
@@ -50,12 +55,12 @@ function serializeUnit(unitDoc, progressDoc) {
     subtitle: unitDoc.subtitle || '',
     icon: unitDoc.icon || 'book',
     order_num: unitDoc.orderNum,
-    lesson_count: unitDoc.lessonCount || 0,
+    lesson_count,
     path_image_url: unitDoc.pathImageUrl || null,
     path_points: unitDoc.pathPoints || null,
     landmark_position: unitDoc.landmarkPosition || null,
     status: progressDoc?.status || 'locked',
-    completed_lessons: progressDoc?.completedLessons || 0,
+    completed_lessons,
     stars: progressDoc?.stars || 0,
     landmarks: Array.isArray(unitDoc.landmarks)
       ? unitDoc.landmarks.map((landmark) => ({
@@ -72,12 +77,14 @@ async function getMongoModels() {
   const Level = require('../models/Level');
   const Module = require('../models/Module');
   const Unit = require('../models/Unit');
+  const Lesson = require('../models/Lesson');
   const UserUnitProgress = require('../models/UserUnitProgress');
   const { getMongoose } = require('../config/mongo');
   return {
     Level,
     Module,
     Unit,
+    Lesson,
     UserUnitProgress,
     mongoose: getMongoose(),
   };
@@ -135,7 +142,7 @@ async function findMongoModuleByIdentifier(Module, mongoose, moduleId) {
 }
 
 async function getModuleByIdForUserMongo(moduleId, userId) {
-  const { Module, Unit, UserUnitProgress, mongoose } = await getMongoModels();
+  const { Module, Unit, Lesson, UserUnitProgress, mongoose } = await getMongoModels();
   const moduleDoc = await findMongoModuleByIdentifier(Module, mongoose, moduleId);
 
   if (!moduleDoc) {
@@ -143,8 +150,20 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
   }
 
   const units = await Unit.find({ moduleId: moduleDoc._id }).sort({ orderNum: 1 }).lean();
-  const userProgressCriteria = buildMongoUserProgressCriteria(userId);
   const unitObjectIds = units.map((unit) => unit._id);
+  const lessonCountByUnit = new Map();
+  if (unitObjectIds.length > 0) {
+    const counts = await Lesson.aggregate([
+      { $match: { unitId: { $in: unitObjectIds } } },
+      { $group: { _id: '$unitId', n: { $sum: 1 } } },
+    ]);
+    for (const row of counts) {
+      if (row._id) {
+        lessonCountByUnit.set(String(row._id), row.n || 0);
+      }
+    }
+  }
+  const userProgressCriteria = buildMongoUserProgressCriteria(userId);
   const legacyUnitIds = units.map((unit) => unit.legacyId).filter((value) => value != null);
   const unitCriteria = [];
   if (unitObjectIds.length > 0) {
@@ -182,7 +201,8 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
 
   const serializedUnits = units.map((unit) => {
     const progress = progressByUnitId.get(`legacy:${unit.legacyId}`) || progressByUnitId.get(`mongo:${String(unit._id)}`) || null;
-    return serializeUnit(unit, progress);
+    const actualLessonCount = lessonCountByUnit.get(String(unit._id)) || 0;
+    return serializeUnit(unit, progress, actualLessonCount);
   });
 
   if (!hasAnyUnitProgress) {

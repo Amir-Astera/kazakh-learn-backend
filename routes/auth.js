@@ -9,10 +9,18 @@ const {
   getCurrentUserById,
   updateUserProfile,
   findOrCreateGoogleUser,
+  completeOnboardingSurvey,
 } = require('../repositories/authRepository');
 const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
+
+const WEEKLY_STUDY_OPTIONS = [5, 10, 15, 20];
+
+function parseAllowedWeeklyMinutes(value) {
+  const n = Number(value);
+  return WEEKLY_STUDY_OPTIONS.includes(n) ? n : null;
+}
 
 // Register
 router.post('/register', async (req, res) => {
@@ -24,10 +32,21 @@ router.post('/register', async (req, res) => {
       language_pair,
       learning_goal,
       proficiency_level,
+      age,
+      weekly_study_minutes,
     } = req.body;
 
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'Все поля обязательны' });
+    }
+
+    const ageNum = Number(age);
+    const weeklyNum = parseAllowedWeeklyMinutes(weekly_study_minutes);
+    if (!Number.isFinite(ageNum) || ageNum < 7 || ageNum > 100) {
+      return res.status(400).json({ error: 'Укажите возраст от 7 до 100 лет' });
+    }
+    if (weeklyNum == null) {
+      return res.status(400).json({ error: 'Выберите 5, 10, 15 или 20 минут в неделю' });
     }
 
     const normalizedLanguagePair = ['ru-kz', 'en-kz'].includes(String(language_pair || '').trim().toLowerCase())
@@ -56,11 +75,14 @@ router.post('/register', async (req, res) => {
       languagePair: normalizedLanguagePair,
       learningGoal: normalizedLearningGoal,
       proficiencyLevel: normalizedProficiencyLevel,
+      age: ageNum,
+      weeklyStudyMinutes: weeklyNum,
     });
 
     const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const safeUser = await getCurrentUserById(user.id);
 
-    res.status(201).json({ token, user });
+    res.status(201).json({ token, user: safeUser });
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
@@ -105,25 +127,41 @@ router.post('/login', async (req, res) => {
     await updateUserLoginState(user.id, newStreak);
 
     const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const fullUser = await getCurrentUserById(user.id);
+    if (!fullUser) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        avatar_url: user.avatar_url || null,
-        xp: user.xp,
-        streak: newStreak,
-        is_admin: user.is_admin,
-        language_pair: user.language_pair,
-        learning_goal: user.learning_goal,
-        proficiency_level: user.proficiency_level,
-        onboarding_completed: user.onboarding_completed,
-      },
+      user: { ...fullUser, streak: newStreak },
     });
   } catch (err) {
     console.error('Login error:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+router.post('/onboarding', authMiddleware, async (req, res) => {
+  try {
+    const { age, weekly_study_minutes } = req.body || {};
+    const ageNum = Number(age);
+    const weeklyNum = parseAllowedWeeklyMinutes(weekly_study_minutes);
+    if (!Number.isFinite(ageNum) || ageNum < 7 || ageNum > 100) {
+      return res.status(400).json({ error: 'Укажите возраст от 7 до 100 лет' });
+    }
+    if (weeklyNum == null) {
+      return res.status(400).json({ error: 'Выберите 5, 10, 15 или 20 минут в неделю' });
+    }
+
+    const user = await completeOnboardingSurvey(req.user.id, { ...req.body, weekly_study_minutes: weeklyNum });
+    if (!user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    res.json(user);
+  } catch (err) {
+    console.error('Onboarding error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });

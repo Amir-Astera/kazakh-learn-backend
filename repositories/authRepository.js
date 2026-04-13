@@ -32,6 +32,8 @@ function normalizeAuthUser(user) {
     language_pair: user.languagePair || 'ru-kz',
     learning_goal: user.learningGoal || 'general',
     proficiency_level: user.proficiencyLevel || 'beginner',
+    age: user.age != null ? user.age : null,
+    weekly_study_minutes: user.weeklyStudyMinutes != null ? user.weeklyStudyMinutes : null,
     onboarding_completed: Boolean(user.onboardingCompleted),
     created_at: user.createdAt || null,
   };
@@ -136,6 +138,8 @@ async function createUserWithDefaults({
   languagePair = 'ru-kz',
   learningGoal = 'general',
   proficiencyLevel = 'beginner',
+  age = null,
+  weeklyStudyMinutes = null,
 }) {
   const { User, UserSkill, UserQuest, UserUnitProgress, Unit } = await getMongoModels();
   const user = await User.create({
@@ -150,6 +154,10 @@ async function createUserWithDefaults({
     languagePair,
     learningGoal,
     proficiencyLevel,
+    age: age != null && Number.isFinite(Number(age)) ? Math.round(Number(age)) : null,
+    weeklyStudyMinutes: weeklyStudyMinutes != null && Number.isFinite(Number(weeklyStudyMinutes))
+      ? Math.round(Number(weeklyStudyMinutes))
+      : null,
     onboardingCompleted: true,
   });
 
@@ -236,6 +244,8 @@ async function getCurrentUserById(userId) {
     language_pair: normalized.language_pair,
     learning_goal: normalized.learning_goal,
     proficiency_level: normalized.proficiency_level,
+    age: normalized.age,
+    weekly_study_minutes: normalized.weekly_study_minutes,
     onboarding_completed: normalized.onboarding_completed,
     created_at: normalized.created_at,
   };
@@ -252,7 +262,6 @@ async function updateUserProfile(userId, payload) {
     languagePair: payload.language_pair,
     learningGoal: payload.learning_goal,
     proficiencyLevel: payload.proficiency_level,
-    onboardingCompleted: true,
   };
 
   const user = await User.findOneAndUpdate(
@@ -278,9 +287,43 @@ async function updateUserProfile(userId, payload) {
     language_pair: normalized.language_pair,
     learning_goal: normalized.learning_goal,
     proficiency_level: normalized.proficiency_level,
+    age: normalized.age,
+    weekly_study_minutes: normalized.weekly_study_minutes,
     onboarding_completed: normalized.onboarding_completed,
     created_at: normalized.created_at,
   };
+}
+
+async function completeOnboardingSurvey(userId, payload) {
+  const { User } = await getMongoModels();
+  const criteria = buildUserIdCriteria(userId);
+  if (!criteria) return null;
+
+  const languagePair = ['ru-kz', 'en-kz'].includes(String(payload.language_pair || '').trim().toLowerCase())
+    ? String(payload.language_pair).trim().toLowerCase()
+    : 'ru-kz';
+  const learningGoal = ['general', 'travel', 'study', 'work'].includes(String(payload.learning_goal || '').trim().toLowerCase())
+    ? String(payload.learning_goal).trim().toLowerCase()
+    : 'general';
+  const proficiencyLevel = ['beginner', 'elementary', 'intermediate'].includes(String(payload.proficiency_level || '').trim().toLowerCase())
+    ? String(payload.proficiency_level).trim().toLowerCase()
+    : 'beginner';
+
+  const ageNum = Number(payload.age);
+  const weeklyNum = Number(payload.weekly_study_minutes);
+
+  await User.updateOne(criteria, {
+    $set: {
+      languagePair,
+      learningGoal,
+      proficiencyLevel,
+      age: Number.isFinite(ageNum) && ageNum >= 5 && ageNum <= 120 ? Math.round(ageNum) : null,
+      weeklyStudyMinutes: [5, 10, 15, 20].includes(weeklyNum) ? weeklyNum : null,
+      onboardingCompleted: true,
+    },
+  });
+
+  return getCurrentUserById(userId);
 }
 
 async function findOrCreateGoogleUser({ googleId, email, name, avatarUrl }) {
@@ -300,7 +343,6 @@ async function findOrCreateGoogleUser({ googleId, email, name, avatarUrl }) {
 
   const newUser = await User.create({
     email: String(email).trim().toLowerCase(),
-    passwordHash: null,
     name: name || email.split('@')[0],
     avatarUrl: avatarUrl || null,
     googleId,
@@ -352,4 +394,5 @@ module.exports = {
   getCurrentUserById,
   updateUserProfile,
   findOrCreateGoogleUser,
+  completeOnboardingSurvey,
 };
