@@ -1,5 +1,4 @@
-const pool = require('../config/db');
-const { getDbProvider, isMongoProvider } = require('../config/dbProvider');
+const { getDbProvider } = require('../config/dbProvider');
 
 let mongooseModule = null;
 
@@ -84,16 +83,6 @@ async function getMongoModels() {
   };
 }
 
-async function getLevelsWithModulesPostgres() {
-  const levels = await pool.query('SELECT * FROM levels ORDER BY order_num');
-  const modules = await pool.query('SELECT * FROM modules ORDER BY order_num');
-
-  return levels.rows.map((level) => ({
-    ...level,
-    modules: modules.rows.filter((moduleItem) => moduleItem.level_id === level.id),
-  }));
-}
-
 async function getLevelsWithModulesMongo() {
   const { Level, Module } = await getMongoModels();
   const [levels, modules] = await Promise.all([
@@ -110,54 +99,6 @@ async function getLevelsWithModulesMongo() {
         .map((moduleItem) => serializeModule(moduleItem, moduleItem.levelId)),
     };
   });
-}
-
-async function getModuleByIdForUserPostgres(moduleId, userId) {
-  const moduleResult = await pool.query(
-    `SELECT m.*, l.code as level_code, l.name as level_name 
-     FROM modules m 
-     JOIN levels l ON m.level_id = l.id 
-     WHERE m.id = $1`,
-    [moduleId]
-  );
-
-  if (moduleResult.rows.length === 0) {
-    return null;
-  }
-
-  const units = await pool.query(
-    `SELECT u.*, 
-            COALESCE(up.status, 'locked') as status,
-            COALESCE(up.completed_lessons, 0) as completed_lessons,
-            COALESCE(up.stars, 0) as stars,
-            COALESCE(
-              json_agg(
-                json_build_object(
-                  'id', lm.id,
-                  'image_url', lm.image_url,
-                  'alt_text', lm.alt_text,
-                  'position', lm.position
-                )
-                ORDER BY lm.created_at, lm.id
-              ) FILTER (WHERE lm.id IS NOT NULL),
-              '[]'::json
-            ) as landmarks
-     FROM units u
-     LEFT JOIN user_progress up ON u.id = up.unit_id AND up.user_id = $1
-     LEFT JOIN landmarks lm ON lm.unit_id = u.id
-     WHERE u.module_id = $2
-     GROUP BY u.id
-     ORDER BY u.order_num`,
-    [userId, moduleId]
-  );
-
-  const result = {
-    ...moduleResult.rows[0],
-    units: units.rows,
-  };
-
-  applyCurrentUnitFallback(result.units);
-  return result;
 }
 
 function buildMongoUserProgressCriteria(userId) {
@@ -225,6 +166,9 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
           : userProgressCriteria
       ).lean()
     : [];
+  const hasAnyUnitProgress = userProgressCriteria
+    ? await UserUnitProgress.exists(userProgressCriteria)
+    : false;
 
   const progressByUnitId = new Map();
   for (const progress of progressDocs) {
@@ -241,43 +185,13 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
     return serializeUnit(unit, progress);
   });
 
-  applyCurrentUnitFallback(serializedUnits);
+  if (!hasAnyUnitProgress) {
+    applyCurrentUnitFallback(serializedUnits);
+  }
 
   return {
     ...serializeModule(moduleDoc, moduleDoc.levelId),
     units: serializedUnits,
-  };
-}
-
-async function getNextModulePreviewPostgres(moduleId) {
-  const current = await pool.query('SELECT * FROM modules WHERE id = $1', [moduleId]);
-  if (current.rows.length === 0) {
-    return undefined;
-  }
-
-  const next = await pool.query(
-    `SELECT m.*, l.code as level_code, l.name as level_name
-     FROM modules m
-     JOIN levels l ON m.level_id = l.id
-     WHERE (m.level_id = $1 AND m.order_num > $2) 
-        OR m.level_id > $1
-     ORDER BY l.order_num, m.order_num
-     LIMIT 1`,
-    [current.rows[0].level_id, current.rows[0].order_num]
-  );
-
-  if (next.rows.length === 0) {
-    return null;
-  }
-
-  const units = await pool.query(
-    'SELECT title_kz FROM units WHERE module_id = $1 ORDER BY order_num LIMIT 3',
-    [next.rows[0].id]
-  );
-
-  return {
-    ...next.rows[0],
-    preview_units: units.rows.map((unit) => unit.title_kz),
   };
 }
 
@@ -330,15 +244,15 @@ function applyCurrentUnitFallback(units) {
 }
 
 async function getLevelsWithModules() {
-  return isMongoProvider() ? getLevelsWithModulesMongo() : getLevelsWithModulesPostgres();
+  return getLevelsWithModulesMongo();
 }
 
 async function getModuleByIdForUser(moduleId, userId) {
-  return isMongoProvider() ? getModuleByIdForUserMongo(moduleId, userId) : getModuleByIdForUserPostgres(moduleId, userId);
+  return getModuleByIdForUserMongo(moduleId, userId);
 }
 
 async function getNextModulePreview(moduleId) {
-  return isMongoProvider() ? getNextModulePreviewMongo(moduleId) : getNextModulePreviewPostgres(moduleId);
+  return getNextModulePreviewMongo(moduleId);
 }
 
 module.exports = {

@@ -1,6 +1,3 @@
-const pool = require('../config/db');
-const { isMongoProvider } = require('../config/dbProvider');
-
 let mongooseModule = null;
 
 function getMongooseModule() {
@@ -165,6 +162,7 @@ function serializeLesson(lessonDoc, progressDoc) {
     type: lessonDoc.type,
     xp_reward: lessonDoc.xpReward || 0,
     order_num: lessonDoc.orderNum,
+    content: lessonDoc.content || null,
     completed: progressDoc?.completed || false,
     score: progressDoc?.score || 0,
     mistakes: progressDoc?.mistakes || 0,
@@ -185,20 +183,26 @@ function serializeExercise(exerciseDoc) {
   };
 }
 
-async function getLessonsForUnitPostgres(unitId, userId) {
-  const lessons = await pool.query(
-    `SELECT l.*,
-            COALESCE(ulp.completed, false) as completed,
-            COALESCE(ulp.score, 0) as score,
-            COALESCE(ulp.mistakes, 0) as mistakes
-     FROM lessons l
-     LEFT JOIN user_lesson_progress ulp ON l.id = ulp.lesson_id AND ulp.user_id = $1
-     WHERE l.unit_id = $2
-     ORDER BY l.order_num`,
-    [userId, unitId]
-  );
+async function getUnitProgressForUser(UserUnitProgress, userId, unitDoc) {
+  const userCriteria = buildUserCriteria(userId);
+  if (!userCriteria || !unitDoc) {
+    return null;
+  }
 
-  return lessons.rows;
+  const unitCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
+  return UserUnitProgress.findOne(combineCriteria(userCriteria, unitCriteria)).lean();
+}
+
+async function assertUnitAccessForUser(userId, unitDoc) {
+  const { UserUnitProgress } = await getMongoModels();
+  const progressDoc = await getUnitProgressForUser(UserUnitProgress, userId, unitDoc);
+  if (!progressDoc || !['current', 'completed'].includes(progressDoc.status)) {
+    const error = new Error('UNIT_LOCKED');
+    error.code = 'UNIT_LOCKED';
+    throw error;
+  }
+
+  return progressDoc;
 }
 
 async function getLessonsForUnitMongo(unitId, userId) {
@@ -207,6 +211,8 @@ async function getLessonsForUnitMongo(unitId, userId) {
   if (!unitDoc) {
     return [];
   }
+
+  await assertUnitAccessForUser(userId, unitDoc);
 
   const lessons = await Lesson.find({ unitId: unitDoc._id }).sort({ orderNum: 1 }).lean();
   const userCriteria = buildUserCriteria(userId);
@@ -234,29 +240,19 @@ async function getLessonsForUnitMongo(unitId, userId) {
   });
 }
 
-async function getLessonByIdWithExercisesPostgres(lessonId) {
-  const lesson = await pool.query('SELECT * FROM lessons WHERE id = $1', [lessonId]);
-  if (lesson.rows.length === 0) {
-    return null;
-  }
-
-  const exercises = await pool.query(
-    'SELECT * FROM exercises WHERE lesson_id = $1 ORDER BY order_num',
-    [lessonId]
-  );
-
-  return {
-    ...lesson.rows[0],
-    exercises: exercises.rows,
-  };
-}
-
-async function getLessonByIdWithExercisesMongo(lessonId) {
-  const { Lesson, Exercise, mongoose } = await getMongoModels();
+async function getLessonByIdWithExercisesMongo(lessonId, userId) {
+  const { Lesson, Exercise, Unit, mongoose } = await getMongoModels();
   const lesson = await findLessonByIdentifier(Lesson, mongoose, lessonId);
   if (!lesson) {
     return null;
   }
+
+  const unitDoc = await Unit.findById(lesson.unitId).lean();
+  if (!unitDoc) {
+    return null;
+  }
+
+  await assertUnitAccessForUser(userId, unitDoc);
 
   const exerciseDocs = await Exercise.find({ lessonId: lesson._id }).sort({ orderNum: 1 }).lean();
 
@@ -266,21 +262,19 @@ async function getLessonByIdWithExercisesMongo(lessonId) {
   };
 }
 
-async function getExerciseAnswerContextPostgres(lessonId, exerciseId) {
-  const exercise = await pool.query(
-    'SELECT * FROM exercises WHERE id = $1 AND lesson_id = $2',
-    [exerciseId, lessonId]
-  );
-
-  return exercise.rows[0] || null;
-}
-
-async function getExerciseAnswerContextMongo(lessonId, exerciseId) {
-  const { Lesson, Exercise, mongoose } = await getMongoModels();
+async function getExerciseAnswerContextMongo(lessonId, exerciseId, userId) {
+  const { Lesson, Exercise, Unit, mongoose } = await getMongoModels();
   const lesson = await findLessonByIdentifier(Lesson, mongoose, lessonId);
   if (!lesson) {
     return null;
   }
+
+  const unitDoc = await Unit.findById(lesson.unitId).lean();
+  if (!unitDoc) {
+    return null;
+  }
+
+  await assertUnitAccessForUser(userId, unitDoc);
 
   const legacyExerciseId = parseLegacyId(exerciseId);
   if (legacyExerciseId != null) {
@@ -300,138 +294,6 @@ async function getExerciseAnswerContextMongo(lessonId, exerciseId) {
   return null;
 }
 
-async function completeLessonForUserPostgres(lessonId, userId, payload) {
-  const normalizedScore = clampScore(payload.score ?? 100);
-  const normalizedMistakes = normalizeMistakes(payload.mistakes ?? 0);
-  const normalizedTimeSpent = Math.max(0, Math.round(Number(payload.timeSpent) || 0));
-
-  const existingProgress = await pool.query(
-    'SELECT completed, score, xp_earned FROM user_lesson_progress WHERE user_id = $1 AND lesson_id = $2',
-    [userId, lessonId]
-  );
-
-  const previousProgress = existingProgress.rows[0] || null;
-  const lesson = await pool.query('SELECT * FROM lessons WHERE id = $1', [lessonId]);
-  if (lesson.rows.length === 0) {
-    return null;
-  }
-
-  const baseXp = lesson.rows[0].xp_reward;
-  const awardedLessonXp = calculateLessonXp(baseXp, normalizedScore, normalizedMistakes);
-  const previousLessonXp = previousProgress?.xp_earned || 0;
-  const xpDelta = Math.max(0, awardedLessonXp - previousLessonXp);
-
-  await pool.query(
-    `INSERT INTO user_lesson_progress (user_id, lesson_id, completed, score, mistakes, xp_earned, time_spent, completed_at)
-     VALUES ($1, $2, true, $3, $4, $5, $6, NOW())
-     ON CONFLICT (user_id, lesson_id)
-     DO UPDATE SET completed = true, score = $3, mistakes = $4, xp_earned = GREATEST(user_lesson_progress.xp_earned, $5), time_spent = $6, completed_at = NOW()`,
-    [userId, lessonId, normalizedScore, normalizedMistakes, awardedLessonXp, normalizedTimeSpent]
-  );
-
-  if (xpDelta > 0) {
-    await pool.query(
-      'UPDATE users SET xp = xp + $1, last_activity = CURRENT_DATE WHERE id = $2',
-      [xpDelta, userId]
-    );
-  } else {
-    await pool.query(
-      'UPDATE users SET last_activity = CURRENT_DATE WHERE id = $1',
-      [userId]
-    );
-  }
-
-  const unit = await pool.query(
-    'SELECT u.id, u.lesson_count FROM units u JOIN lessons l ON l.unit_id = u.id WHERE l.id = $1',
-    [lessonId]
-  );
-
-  if (unit.rows.length > 0) {
-    const unitId = unit.rows[0].id;
-    const totalLessons = unit.rows[0].lesson_count;
-
-    const completedCount = await pool.query(
-      'SELECT COUNT(*) as cnt FROM user_lesson_progress WHERE user_id = $1 AND lesson_id IN (SELECT id FROM lessons WHERE unit_id = $2) AND completed = true',
-      [userId, unitId]
-    );
-
-    const completed = parseInt(completedCount.rows[0].cnt, 10);
-    const stars = completed >= totalLessons ? 3 : completed >= totalLessons * 0.6 ? 2 : 1;
-    const status = completed >= totalLessons ? 'completed' : 'current';
-
-    await pool.query(
-      `INSERT INTO user_progress (user_id, unit_id, status, completed_lessons, stars)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (user_id, unit_id)
-       DO UPDATE SET status = $3, completed_lessons = $4, stars = $5`,
-      [userId, unitId, status, completed, stars]
-    );
-
-    if (status === 'completed') {
-      const nextUnit = await pool.query(
-        `SELECT u.id FROM units u 
-         WHERE u.module_id = (SELECT module_id FROM units WHERE id = $1) 
-         AND u.order_num > (SELECT order_num FROM units WHERE id = $1)
-         ORDER BY u.order_num LIMIT 1`,
-        [unitId]
-      );
-
-      if (nextUnit.rows.length > 0) {
-        await pool.query(
-          `INSERT INTO user_progress (user_id, unit_id, status)
-           VALUES ($1, $2, 'current')
-           ON CONFLICT (user_id, unit_id) DO UPDATE SET status = 'current'`,
-          [userId, nextUnit.rows[0].id]
-        );
-      }
-    }
-  }
-
-  const skillMap = {
-    translation: 'vocabulary',
-    choice: 'vocabulary',
-    grammar: 'grammar',
-    sentence: 'grammar',
-    listening: 'listening',
-    speaking: 'speaking',
-  };
-  const skillName = skillMap[lesson.rows[0].type] || 'vocabulary';
-  const previousSkillScore = previousProgress?.score || 0;
-  const currentSkillIncrease = Math.max(1, Math.floor(normalizedScore / 20));
-  const previousSkillIncrease = previousProgress?.completed ? Math.max(1, Math.floor(previousSkillScore / 20)) : 0;
-  const skillIncreaseDelta = Math.max(0, currentSkillIncrease - previousSkillIncrease);
-
-  if (skillIncreaseDelta > 0) {
-    await pool.query(
-      `INSERT INTO user_skills (user_id, skill_name, progress)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id, skill_name)
-       DO UPDATE SET progress = LEAST(100, user_skills.progress + $3)`,
-      [userId, skillName, skillIncreaseDelta]
-    );
-  }
-
-  if (!previousProgress?.completed) {
-    await pool.query(
-      `UPDATE user_quests SET current = current + 1 
-       WHERE user_id = $1 AND quest_type = 'lessons' AND completed = false`,
-      [userId]
-    );
-
-    await pool.query(
-      `UPDATE user_quests SET completed = true 
-       WHERE user_id = $1 AND current >= target AND completed = false`,
-      [userId]
-    );
-  }
-
-  return {
-    xp_earned: xpDelta,
-    total_lesson_xp: awardedLessonXp,
-    message: 'Урок завершён!',
-  };
-}
-
 async function completeLessonForUserMongo(lessonId, userId, payload) {
   const { User, Unit, Lesson, UserLessonProgress, UserUnitProgress, UserSkill, UserQuest, mongoose } = await getMongoModels();
   const normalizedScore = clampScore(payload.score ?? 100);
@@ -446,6 +308,13 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
   if (!userDoc || !lessonDoc) {
     return null;
   }
+
+  const unitDoc = await Unit.findById(lessonDoc.unitId).lean();
+  if (!unitDoc) {
+    return null;
+  }
+
+  await assertUnitAccessForUser(userId, unitDoc);
 
   const userCriteria = buildUserCriteria(userId);
   const lessonProgressCriteria = buildLinkedCriteria('lessonId', 'legacyLessonId', [lessonDoc._id], [lessonDoc.legacyId]);
@@ -494,70 +363,67 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
     );
   }
 
-  const unitDoc = await Unit.findById(lessonDoc.unitId).lean();
-  if (unitDoc) {
-    const unitLessons = await Lesson.find({ unitId: unitDoc._id }).select('_id legacyId').lean();
-    const completedLessonsCriteria = buildLinkedCriteria(
-      'lessonId',
-      'legacyLessonId',
-      unitLessons.map((item) => item._id),
-      unitLessons.map((item) => item.legacyId)
-    );
+  const unitLessons = await Lesson.find({ unitId: unitDoc._id }).select('_id legacyId').lean();
+  const completedLessonsCriteria = buildLinkedCriteria(
+    'lessonId',
+    'legacyLessonId',
+    unitLessons.map((item) => item._id),
+    unitLessons.map((item) => item.legacyId)
+  );
 
-    const completed = await UserLessonProgress.countDocuments(
-      combineCriteria(userCriteria, completedLessonsCriteria, { completed: true })
-    );
+  const completed = await UserLessonProgress.countDocuments(
+    combineCriteria(userCriteria, completedLessonsCriteria, { completed: true })
+  );
 
-    const totalLessons = unitDoc.lessonCount || unitLessons.length;
-    const stars = completed >= totalLessons ? 3 : completed >= totalLessons * 0.6 ? 2 : 1;
-    const status = completed >= totalLessons ? 'completed' : 'current';
-    const unitProgressCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
+  const totalLessons = unitDoc.lessonCount || unitLessons.length;
+  const stars = completed >= totalLessons ? 3 : completed >= totalLessons * 0.6 ? 2 : 1;
+  const status = completed >= totalLessons ? 'completed' : 'current';
+  const unitProgressCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
 
-    await UserUnitProgress.updateOne(
-      combineCriteria(userCriteria, unitProgressCriteria),
-      {
-        $set: {
-          userId: userDoc._id,
-          legacyUserId: userDoc.legacyId,
-          unitId: unitDoc._id,
-          legacyUnitId: unitDoc.legacyId,
-          status,
-          completedLessons: completed,
-          stars,
-        },
+  await UserUnitProgress.updateOne(
+    combineCriteria(userCriteria, unitProgressCriteria),
+    {
+      $set: {
+        userId: userDoc._id,
+        legacyUserId: userDoc.legacyId,
+        unitId: unitDoc._id,
+        legacyUnitId: unitDoc.legacyId,
+        status,
+        completedLessons: completed,
+        stars,
       },
-      { upsert: true }
-    );
+    },
+    { upsert: true }
+  );
 
-    if (status === 'completed') {
-      const nextUnit = await Unit.findOne({
-        moduleId: unitDoc.moduleId,
-        orderNum: { $gt: unitDoc.orderNum },
-      }).sort({ orderNum: 1 }).lean();
+  if (status === 'completed') {
+    const nextUnit = await Unit.findOne({
+      moduleId: unitDoc.moduleId,
+      orderNum: { $gt: unitDoc.orderNum },
+    }).sort({ orderNum: 1 }).lean();
 
-      if (nextUnit) {
-        const nextUnitProgressCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [nextUnit._id], [nextUnit.legacyId]);
-        const existingNextProgress = await UserUnitProgress.findOne(combineCriteria(userCriteria, nextUnitProgressCriteria)).lean();
+    if (nextUnit) {
+      const nextUnitProgressCriteria = buildLinkedCriteria('unitId', 'legacyUnitId', [nextUnit._id], [nextUnit.legacyId]);
+      const existingNextProgress = await UserUnitProgress.findOne(combineCriteria(userCriteria, nextUnitProgressCriteria)).lean();
 
-        if (!existingNextProgress || existingNextProgress.status === 'locked') {
-          await UserUnitProgress.updateOne(
-            combineCriteria(userCriteria, nextUnitProgressCriteria),
-            {
-              $set: {
-                userId: userDoc._id,
-                legacyUserId: userDoc.legacyId,
-                unitId: nextUnit._id,
-                legacyUnitId: nextUnit.legacyId,
-                status: 'current',
-              },
-              $setOnInsert: {
-                completedLessons: 0,
-                stars: 0,
-              },
+      if (!existingNextProgress || existingNextProgress.status === 'locked') {
+        await UserUnitProgress.updateOne(
+          combineCriteria(userCriteria, nextUnitProgressCriteria),
+          {
+            $set: {
+              userId: userDoc._id,
+              legacyUserId: userDoc.legacyId,
+              unitId: nextUnit._id,
+              legacyUnitId: nextUnit.legacyId,
+              status: 'current',
             },
-            { upsert: true }
-          );
-        }
+            $setOnInsert: {
+              completedLessons: 0,
+              stars: 0,
+            },
+          },
+          { upsert: true }
+        );
       }
     }
   }
@@ -565,6 +431,7 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
   const skillMap = {
     translation: 'vocabulary',
     choice: 'vocabulary',
+    theory: 'vocabulary',
     grammar: 'grammar',
     sentence: 'grammar',
     listening: 'listening',
@@ -618,19 +485,19 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
 }
 
 async function getLessonsForUnit(unitId, userId) {
-  return isMongoProvider() ? getLessonsForUnitMongo(unitId, userId) : getLessonsForUnitPostgres(unitId, userId);
+  return getLessonsForUnitMongo(unitId, userId);
 }
 
-async function getLessonByIdWithExercises(lessonId) {
-  return isMongoProvider() ? getLessonByIdWithExercisesMongo(lessonId) : getLessonByIdWithExercisesPostgres(lessonId);
+async function getLessonByIdWithExercises(lessonId, userId) {
+  return getLessonByIdWithExercisesMongo(lessonId, userId);
 }
 
-async function getExerciseAnswerContext(lessonId, exerciseId) {
-  return isMongoProvider() ? getExerciseAnswerContextMongo(lessonId, exerciseId) : getExerciseAnswerContextPostgres(lessonId, exerciseId);
+async function getExerciseAnswerContext(lessonId, exerciseId, userId) {
+  return getExerciseAnswerContextMongo(lessonId, exerciseId, userId);
 }
 
 async function completeLessonForUser(lessonId, userId, payload) {
-  return isMongoProvider() ? completeLessonForUserMongo(lessonId, userId, payload) : completeLessonForUserPostgres(lessonId, userId, payload);
+  return completeLessonForUserMongo(lessonId, userId, payload);
 }
 
 module.exports = {

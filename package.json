@@ -7,10 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "db:init": "node db/init-mongo.js",
-    "db:seed": "node db/seed-mongo.js",
-    "db:init:postgres": "node db/init.js",
-    "db:seed:postgres": "node db/seed.js",
-    "db:migrate:mongo": "node db/migrate-postgres-to-mongo.js"
+    "db:seed": "node db/seed-mongo.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -19,8 +16,7 @@
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.8.3",
-    "multer": "^2.1.1",
-    "pg": "^8.11.3"
+    "multer": "^2.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

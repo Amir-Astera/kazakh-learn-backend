@@ -1,9 +1,7 @@
 const jwt = require('jsonwebtoken');
-const { isMongoProvider } = require('../config/dbProvider');
 require('dotenv').config();
 
 let mongooseModule = null;
-let postgresPool = null;
 
 function getMongooseModule() {
   if (!mongooseModule) {
@@ -12,14 +10,6 @@ function getMongooseModule() {
   }
 
   return mongooseModule;
-}
-
-function getPostgresPool() {
-  if (!postgresPool) {
-    postgresPool = require('../config/db');
-  }
-
-  return postgresPool;
 }
 
 function buildUserIdCriteria(userId) {
@@ -50,11 +40,6 @@ async function isAdminMongo(userId) {
   return Boolean(user?.isAdmin);
 }
 
-async function isAdminPostgres(userId) {
-  const result = await getPostgresPool().query('SELECT is_admin FROM users WHERE id = $1', [userId]);
-  return Boolean(result.rows[0]?.is_admin);
-}
-
 async function adminMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header) return res.status(401).json({ error: 'Нет токена' });
@@ -70,7 +55,7 @@ async function adminMiddleware(req, res, next) {
   }
 
   try {
-    const isAdmin = isMongoProvider() ? await isAdminMongo(decoded.id) : await isAdminPostgres(decoded.id);
+    const isAdmin = await isAdminMongo(decoded.id);
     if (!isAdmin) {
       return res.status(403).json({ error: 'Доступ запрещён. Только для администраторов.' });
     }

@@ -1,5 +1,4 @@
-const pool = require('../config/db');
-const { isMongoProvider } = require('../config/dbProvider');
+require('dotenv').config();
 
 let mongooseModule = null;
 
@@ -30,6 +29,10 @@ function normalizeAuthUser(user) {
     streak: user.streak || 0,
     last_activity: user.lastActivity || null,
     is_admin: Boolean(user.isAdmin),
+    language_pair: user.languagePair || 'ru-kz',
+    learning_goal: user.learningGoal || 'general',
+    proficiency_level: user.proficiencyLevel || 'beginner',
+    onboarding_completed: Boolean(user.onboardingCompleted),
     created_at: user.createdAt || null,
   };
 }
@@ -119,60 +122,35 @@ async function findFirstUnitMongo(Unit) {
   return hydratedUnits[0];
 }
 
-async function findUserByEmailPostgres(email) {
-  const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-  return result.rows[0] || null;
-}
-
-async function findUserByEmailMongo(email) {
+async function findUserByEmail(email) {
   const { User } = await getMongoModels();
   const user = await User.findOne({ email: String(email).trim().toLowerCase() }).lean();
   return normalizeAuthUser(user);
 }
 
-async function createUserWithDefaultsPostgres({ email, passwordHash, name }) {
-  const result = await pool.query(
-    'INSERT INTO users (email, password_hash, name, last_activity) VALUES ($1, $2, $3, CURRENT_DATE) RETURNING id, email, name, xp, streak',
-    [email, passwordHash, name]
-  );
-
-  const user = result.rows[0];
-  const skills = ['vocabulary', 'grammar', 'listening', 'speaking'];
-  for (const skill of skills) {
-    await pool.query(
-      'INSERT INTO user_skills (user_id, skill_name, progress) VALUES ($1, $2, 0)',
-      [user.id, skill]
-    );
-  }
-
-  const firstUnit = await pool.query(
-    'SELECT u.id FROM units u JOIN modules m ON u.module_id = m.id JOIN levels l ON m.level_id = l.id ORDER BY l.order_num, m.order_num, u.order_num LIMIT 1'
-  );
-  if (firstUnit.rows.length > 0) {
-    await pool.query(
-      "INSERT INTO user_progress (user_id, unit_id, status) VALUES ($1, $2, 'current')",
-      [user.id, firstUnit.rows[0].id]
-    );
-  }
-
-  await pool.query(
-    "INSERT INTO user_quests (user_id, quest_name, quest_type, target, xp_reward) VALUES ($1, 'Выучить 5 новых слов', 'words', 5, 15), ($1, 'Пройти 3 микроурока', 'lessons', 3, 30)",
-    [user.id]
-  );
-
-  return user;
-}
-
-async function createUserWithDefaultsMongo({ email, passwordHash, name }) {
+async function createUserWithDefaults({
+  email,
+  passwordHash,
+  name,
+  avatarUrl = null,
+  languagePair = 'ru-kz',
+  learningGoal = 'general',
+  proficiencyLevel = 'beginner',
+}) {
   const { User, UserSkill, UserQuest, UserUnitProgress, Unit } = await getMongoModels();
   const user = await User.create({
     email: String(email).trim().toLowerCase(),
     passwordHash,
     name,
+    avatarUrl,
     lastActivity: new Date(),
     streak: 1,
     xp: 0,
     isAdmin: false,
+    languagePair,
+    learningGoal,
+    proficiencyLevel,
+    onboardingCompleted: true,
   });
 
   const skills = ['vocabulary', 'grammar', 'listening', 'speaking'];
@@ -221,23 +199,10 @@ async function createUserWithDefaultsMongo({ email, passwordHash, name }) {
     },
   ]);
 
-  return {
-    id: user.legacyId ?? String(user._id),
-    email: user.email,
-    name: user.name,
-    xp: user.xp || 0,
-    streak: user.streak || 0,
-  };
+  return normalizeAuthUser(user);
 }
 
-async function updateUserLoginStatePostgres(userId, streak) {
-  await pool.query(
-    'UPDATE users SET last_activity = CURRENT_DATE, streak = $1 WHERE id = $2',
-    [streak, userId]
-  );
-}
-
-async function updateUserLoginStateMongo(userId, streak) {
+async function updateUserLoginState(userId, streak) {
   const { User } = await getMongoModels();
   const criteria = buildUserIdCriteria(userId);
   if (!criteria) return;
@@ -250,16 +215,7 @@ async function updateUserLoginStateMongo(userId, streak) {
   });
 }
 
-async function getCurrentUserByIdPostgres(userId) {
-  const result = await pool.query(
-    'SELECT id, email, name, avatar_url, xp, streak, last_activity, created_at FROM users WHERE id = $1',
-    [userId]
-  );
-
-  return result.rows[0] || null;
-}
-
-async function getCurrentUserByIdMongo(userId) {
+async function getCurrentUserById(userId) {
   const { User } = await getMongoModels();
   const criteria = buildUserIdCriteria(userId);
   if (!criteria) return null;
@@ -276,24 +232,117 @@ async function getCurrentUserByIdMongo(userId) {
     xp: normalized.xp,
     streak: normalized.streak,
     last_activity: normalized.last_activity,
+    is_admin: normalized.is_admin,
+    language_pair: normalized.language_pair,
+    learning_goal: normalized.learning_goal,
+    proficiency_level: normalized.proficiency_level,
+    onboarding_completed: normalized.onboarding_completed,
     created_at: normalized.created_at,
   };
 }
 
-async function findUserByEmail(email) {
-  return isMongoProvider() ? findUserByEmailMongo(email) : findUserByEmailPostgres(email);
+async function updateUserProfile(userId, payload) {
+  const { User } = await getMongoModels();
+  const criteria = buildUserIdCriteria(userId);
+  if (!criteria) return null;
+
+  const update = {
+    name: String(payload.name || '').trim(),
+    avatarUrl: payload.avatar_url ? String(payload.avatar_url).trim() : null,
+    languagePair: payload.language_pair,
+    learningGoal: payload.learning_goal,
+    proficiencyLevel: payload.proficiency_level,
+    onboardingCompleted: true,
+  };
+
+  const user = await User.findOneAndUpdate(
+    criteria,
+    {
+      $set: update,
+    },
+    { new: true }
+  ).lean();
+
+  if (!user) return null;
+
+  const normalized = normalizeAuthUser(user);
+  return {
+    id: normalized.id,
+    email: normalized.email,
+    name: normalized.name,
+    avatar_url: normalized.avatar_url,
+    xp: normalized.xp,
+    streak: normalized.streak,
+    last_activity: normalized.last_activity,
+    is_admin: normalized.is_admin,
+    language_pair: normalized.language_pair,
+    learning_goal: normalized.learning_goal,
+    proficiency_level: normalized.proficiency_level,
+    onboarding_completed: normalized.onboarding_completed,
+    created_at: normalized.created_at,
+  };
 }
 
-async function createUserWithDefaults(payload) {
-  return isMongoProvider() ? createUserWithDefaultsMongo(payload) : createUserWithDefaultsPostgres(payload);
-}
+async function findOrCreateGoogleUser({ googleId, email, name, avatarUrl }) {
+  const { User, UserSkill, UserQuest, UserUnitProgress, Unit } = await getMongoModels();
 
-async function updateUserLoginState(userId, streak) {
-  return isMongoProvider() ? updateUserLoginStateMongo(userId, streak) : updateUserLoginStatePostgres(userId, streak);
-}
+  let user = await User.findOne({ googleId }).lean();
+  if (user) {
+    await User.updateOne({ _id: user._id }, { $set: { lastActivity: new Date() } });
+    return normalizeAuthUser({ ...user, lastActivity: new Date() });
+  }
 
-async function getCurrentUserById(userId) {
-  return isMongoProvider() ? getCurrentUserByIdMongo(userId) : getCurrentUserByIdPostgres(userId);
+  user = await User.findOne({ email: String(email).trim().toLowerCase() }).lean();
+  if (user) {
+    await User.updateOne({ _id: user._id }, { $set: { googleId, lastActivity: new Date(), avatarUrl: avatarUrl || user.avatarUrl } });
+    return normalizeAuthUser({ ...user, googleId, lastActivity: new Date() });
+  }
+
+  const newUser = await User.create({
+    email: String(email).trim().toLowerCase(),
+    passwordHash: null,
+    name: name || email.split('@')[0],
+    avatarUrl: avatarUrl || null,
+    googleId,
+    lastActivity: new Date(),
+    streak: 1,
+    xp: 0,
+    isAdmin: false,
+    languagePair: 'ru-kz',
+    learningGoal: 'general',
+    proficiencyLevel: 'beginner',
+    onboardingCompleted: false,
+  });
+
+  const skills = ['vocabulary', 'grammar', 'listening', 'speaking'];
+  await UserSkill.insertMany(
+    skills.map((skillName) => ({
+      userId: newUser._id,
+      legacyUserId: newUser.legacyId,
+      skillName,
+      progress: 0,
+    }))
+  );
+
+  const firstUnit = await findFirstUnitMongo(Unit);
+  if (firstUnit) {
+    await UserUnitProgress.create({
+      userId: newUser._id,
+      legacyUserId: newUser.legacyId,
+      unitId: firstUnit._id,
+      legacyUnitId: firstUnit.legacyId,
+      status: 'current',
+      completedLessons: 0,
+      stars: 0,
+    });
+  }
+
+  await UserQuest.insertMany([
+    { userId: newUser._id, legacyUserId: newUser.legacyId, questName: 'Выучить 5 новых слов', questType: 'words', target: 5, xpReward: 15, current: 0, completed: false },
+    { userId: newUser._id, legacyUserId: newUser.legacyId, questName: 'Пройти 3 микроурока', questType: 'lessons', target: 3, xpReward: 30, current: 0, completed: false },
+  ]);
+
+  return normalizeAuthUser(newUser);
 }
 
 module.exports = {
@@ -301,4 +350,6 @@ module.exports = {
   createUserWithDefaults,
   updateUserLoginState,
   getCurrentUserById,
+  updateUserProfile,
+  findOrCreateGoogleUser,
 };

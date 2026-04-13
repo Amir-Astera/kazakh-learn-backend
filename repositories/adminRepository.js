@@ -1,6 +1,3 @@
-const pool = require('../config/db');
-const { isMongoProvider } = require('../config/dbProvider');
-
 let mongooseModule = null;
 
 function getMongooseModule() {
@@ -158,6 +155,7 @@ function serializeLesson(lessonDoc, unitDoc) {
     type: lessonDoc.type,
     xp_reward: lessonDoc.xpReward || 0,
     order_num: lessonDoc.orderNum,
+    content: lessonDoc.content || null,
     unit_title: unitDoc?.titleKz,
   };
 }
@@ -238,24 +236,10 @@ async function deleteUnitsCascade(models, unitIds) {
   ]);
 }
 
-async function getAdminLevelsPostgres() {
-  const result = await pool.query('SELECT * FROM levels ORDER BY order_num');
-  return result.rows;
-}
-
 async function getAdminLevelsMongo() {
   const { Level } = await getMongoModels();
   const levels = await Level.find().sort({ orderNum: 1 }).lean();
   return levels.map(serializeLevel);
-}
-
-async function createLevelPostgres(payload) {
-  const result = await pool.query(
-    'INSERT INTO levels (code, name, description, order_num) VALUES ($1,$2,$3,$4) RETURNING *',
-    [payload.code, payload.name, payload.description, payload.order_num]
-  );
-
-  return result.rows[0];
 }
 
 async function createLevelMongo(payload) {
@@ -269,15 +253,6 @@ async function createLevelMongo(payload) {
   });
 
   return serializeLevel(level);
-}
-
-async function updateLevelPostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE levels SET code=$1, name=$2, description=$3, order_num=$4 WHERE id=$5 RETURNING *',
-    [payload.code, payload.name, payload.description, payload.order_num, id]
-  );
-
-  return result.rows[0] || null;
 }
 
 async function updateLevelMongo(id, payload) {
@@ -302,11 +277,6 @@ async function updateLevelMongo(id, payload) {
   return level ? serializeLevel(level) : null;
 }
 
-async function deleteLevelPostgres(id) {
-  await pool.query('DELETE FROM levels WHERE id=$1', [id]);
-  return { success: true };
-}
-
 async function deleteLevelMongo(id) {
   const models = await getMongoModels();
   const { Level, Module, Unit, Lesson, Exercise, UserUnitProgress, UserLessonProgress } = models;
@@ -327,13 +297,6 @@ async function deleteLevelMongo(id) {
   return { success: true };
 }
 
-async function getAdminModulesPostgres() {
-  const result = await pool.query(
-    `SELECT m.*, l.code as level_code FROM modules m JOIN levels l ON m.level_id=l.id ORDER BY l.order_num, m.order_num`
-  );
-  return result.rows;
-}
-
 async function getAdminModulesMongo() {
   const { Module } = await getMongoModels();
   const modules = await Module.find().populate('levelId').lean();
@@ -346,15 +309,6 @@ async function getAdminModulesMongo() {
   });
 
   return modules.map((moduleDoc) => serializeModule(moduleDoc, moduleDoc.levelId));
-}
-
-async function createModulePostgres(payload) {
-  const result = await pool.query(
-    'INSERT INTO modules (level_id,title,title_kz,description,order_num,required_xp) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-    [payload.level_id, payload.title, payload.title_kz, payload.description, payload.order_num, payload.required_xp || 0]
-  );
-
-  return result.rows[0];
 }
 
 async function createModuleMongo(payload) {
@@ -374,15 +328,6 @@ async function createModuleMongo(payload) {
   });
 
   return serializeModule(moduleDoc, level);
-}
-
-async function updateModulePostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE modules SET level_id=$1,title=$2,title_kz=$3,description=$4,order_num=$5,required_xp=$6 WHERE id=$7 RETURNING *',
-    [payload.level_id, payload.title, payload.title_kz, payload.description, payload.order_num, payload.required_xp || 0, id]
-  );
-
-  return result.rows[0] || null;
 }
 
 async function updateModuleMongo(id, payload) {
@@ -410,11 +355,6 @@ async function updateModuleMongo(id, payload) {
   return moduleDoc ? serializeModule(moduleDoc, level) : null;
 }
 
-async function deleteModulePostgres(id) {
-  await pool.query('DELETE FROM modules WHERE id=$1', [id]);
-  return { success: true };
-}
-
 async function deleteModuleMongo(id) {
   const models = await getMongoModels();
   const { Module, Unit, Lesson, Exercise, UserUnitProgress, UserLessonProgress } = models;
@@ -431,30 +371,6 @@ async function deleteModuleMongo(id) {
   return { success: true };
 }
 
-async function getAdminUnitsPostgres() {
-  const result = await pool.query(
-    `SELECT u.*, m.title as module_title,
-            COALESCE(
-              json_agg(
-                json_build_object(
-                  'id', lm.id,
-                  'image_url', lm.image_url,
-                  'alt_text', lm.alt_text,
-                  'position', lm.position
-                )
-                ORDER BY lm.created_at, lm.id
-              ) FILTER (WHERE lm.id IS NOT NULL),
-              '[]'::json
-            ) as landmarks
-     FROM units u
-     JOIN modules m ON u.module_id=m.id
-     LEFT JOIN landmarks lm ON lm.unit_id=u.id
-     GROUP BY u.id, m.title
-     ORDER BY m.order_num, u.order_num`
-  );
-  return result.rows;
-}
-
 async function getAdminUnitsMongo() {
   const { Unit } = await getMongoModels();
   const units = await Unit.find().populate('moduleId').lean();
@@ -467,15 +383,6 @@ async function getAdminUnitsMongo() {
   });
 
   return units.map((unitDoc) => serializeUnit(unitDoc, unitDoc.moduleId));
-}
-
-async function createUnitPostgres(payload) {
-  const result = await pool.query(
-    'INSERT INTO units (module_id,title,title_kz,subtitle,icon,order_num,lesson_count) VALUES ($1,$2,$3,$4,$5,$6,0) RETURNING *',
-    [payload.module_id, payload.title, payload.title_kz, payload.subtitle, payload.icon || 'book', payload.order_num]
-  );
-
-  return result.rows[0];
 }
 
 async function createUnitMongo(payload) {
@@ -502,15 +409,6 @@ async function createUnitMongo(payload) {
   return serializeUnit(unitDoc, moduleDoc);
 }
 
-async function updateUnitPostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE units SET module_id=$1,title=$2,title_kz=$3,subtitle=$4,icon=$5,order_num=$6 WHERE id=$7 RETURNING *',
-    [payload.module_id, payload.title, payload.title_kz, payload.subtitle, payload.icon || 'book', payload.order_num, id]
-  );
-
-  return result.rows[0] || null;
-}
-
 async function updateUnitMongo(id, payload) {
   const { Module, Unit } = await getMongoModels();
   const moduleDoc = await findModuleByIdentifier(Module, payload.module_id);
@@ -534,16 +432,6 @@ async function updateUnitMongo(id, payload) {
   ).lean();
 
   return unitDoc ? serializeUnit(unitDoc, moduleDoc) : null;
-}
-
-async function deleteUnitPostgres(id) {
-  const existing = await pool.query('SELECT path_image_url FROM units WHERE id=$1', [id]);
-  await pool.query('DELETE FROM units WHERE id=$1', [id]);
-
-  return {
-    success: true,
-    path_image_url: existing.rows[0]?.path_image_url || null,
-  };
 }
 
 async function deleteUnitMongo(id) {
@@ -573,34 +461,6 @@ function findLandmarkIndex(unitDoc, landmarkId) {
   });
 }
 
-async function updateUnitLayoutPostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE units SET path_points=$1, landmark_position=$2 WHERE id=$3 RETURNING *',
-    [
-      payload.path_points == null ? null : JSON.stringify(payload.path_points),
-      payload.landmark_position == null ? null : JSON.stringify(payload.landmark_position),
-      id,
-    ]
-  );
-
-  for (const landmark of payload.landmarks || []) {
-    await pool.query(
-      'UPDATE landmarks SET position=$1 WHERE id=$2 AND unit_id=$3',
-      [landmark.position == null ? null : JSON.stringify(landmark.position), landmark.id, id]
-    );
-  }
-
-  const landmarksResult = await pool.query(
-    'SELECT * FROM landmarks WHERE unit_id=$1 ORDER BY created_at, id',
-    [id]
-  );
-
-  return {
-    ...result.rows[0],
-    landmarks: landmarksResult.rows,
-  };
-}
-
 async function updateUnitLayoutMongo(id, payload) {
   const { Unit } = await getMongoModels();
   const criteria = buildRootIdCriteria(id);
@@ -625,22 +485,7 @@ async function updateUnitLayoutMongo(id, payload) {
 }
 
 async function updateUnitLayout(id, payload) {
-  return isMongoProvider() ? updateUnitLayoutMongo(id, payload) : updateUnitLayoutPostgres(id, payload);
-}
-
-async function uploadUnitPathImagePostgres(id, imageUrl) {
-  const existing = await pool.query('SELECT path_image_url FROM units WHERE id=$1', [id]);
-  if (!existing.rows[0]) return null;
-
-  const result = await pool.query(
-    'UPDATE units SET path_image_url=$1 WHERE id=$2 RETURNING *',
-    [imageUrl, id]
-  );
-
-  return {
-    item: result.rows[0],
-    previous_path_image_url: existing.rows[0].path_image_url || null,
-  };
+  return updateUnitLayoutMongo(id, payload);
 }
 
 async function uploadUnitPathImageMongo(id, imageUrl) {
@@ -663,19 +508,7 @@ async function uploadUnitPathImageMongo(id, imageUrl) {
 }
 
 async function uploadUnitPathImage(id, imageUrl) {
-  return isMongoProvider() ? uploadUnitPathImageMongo(id, imageUrl) : uploadUnitPathImagePostgres(id, imageUrl);
-}
-
-async function deleteUnitPathImagePostgres(id) {
-  const existing = await pool.query('SELECT path_image_url FROM units WHERE id=$1', [id]);
-  if (existing.rows[0]?.path_image_url) {
-    await pool.query('UPDATE units SET path_image_url=NULL WHERE id=$1', [id]);
-  }
-
-  return {
-    success: true,
-    previous_path_image_url: existing.rows[0]?.path_image_url || null,
-  };
+  return uploadUnitPathImageMongo(id, imageUrl);
 }
 
 async function deleteUnitPathImageMongo(id) {
@@ -697,16 +530,7 @@ async function deleteUnitPathImageMongo(id) {
 }
 
 async function deleteUnitPathImage(id) {
-  return isMongoProvider() ? deleteUnitPathImageMongo(id) : deleteUnitPathImagePostgres(id);
-}
-
-async function createLandmarkPostgres(unitId, payload) {
-  const result = await pool.query(
-    'INSERT INTO landmarks (unit_id, image_url, alt_text) VALUES ($1,$2,$3) RETURNING *',
-    [unitId, payload.image_url, payload.alt_text]
-  );
-
-  return result.rows[0];
+  return deleteUnitPathImageMongo(id);
 }
 
 async function createLandmarkMongo(unitId, payload) {
@@ -732,27 +556,7 @@ async function createLandmarkMongo(unitId, payload) {
 }
 
 async function createLandmark(unitId, payload) {
-  return isMongoProvider() ? createLandmarkMongo(unitId, payload) : createLandmarkPostgres(unitId, payload);
-}
-
-async function updateLandmarkPostgres(unitId, landmarkId, payload) {
-  const existing = await pool.query(
-    'SELECT * FROM landmarks WHERE id=$1 AND unit_id=$2',
-    [landmarkId, unitId]
-  );
-
-  if (!existing.rows[0]) return null;
-
-  const nextImageUrl = payload.image_url || existing.rows[0].image_url;
-  const result = await pool.query(
-    'UPDATE landmarks SET image_url=$1, alt_text=$2 WHERE id=$3 AND unit_id=$4 RETURNING *',
-    [nextImageUrl, payload.alt_text, landmarkId, unitId]
-  );
-
-  return {
-    item: result.rows[0],
-    previous_image_url: payload.image_url ? existing.rows[0].image_url : null,
-  };
+  return createLandmarkMongo(unitId, payload);
 }
 
 async function updateLandmarkMongo(unitId, landmarkId, payload) {
@@ -779,25 +583,7 @@ async function updateLandmarkMongo(unitId, landmarkId, payload) {
 }
 
 async function updateLandmark(unitId, landmarkId, payload) {
-  return isMongoProvider()
-    ? updateLandmarkMongo(unitId, landmarkId, payload)
-    : updateLandmarkPostgres(unitId, landmarkId, payload);
-}
-
-async function deleteLandmarkPostgres(unitId, landmarkId) {
-  const existing = await pool.query(
-    'SELECT image_url FROM landmarks WHERE id=$1 AND unit_id=$2',
-    [landmarkId, unitId]
-  );
-
-  if (existing.rows.length > 0) {
-    await pool.query('DELETE FROM landmarks WHERE id=$1 AND unit_id=$2', [landmarkId, unitId]);
-  }
-
-  return {
-    success: true,
-    image_url: existing.rows[0]?.image_url || null,
-  };
+  return updateLandmarkMongo(unitId, landmarkId, payload);
 }
 
 async function deleteLandmarkMongo(unitId, landmarkId) {
@@ -822,17 +608,7 @@ async function deleteLandmarkMongo(unitId, landmarkId) {
 }
 
 async function deleteLandmark(unitId, landmarkId) {
-  return isMongoProvider()
-    ? deleteLandmarkMongo(unitId, landmarkId)
-    : deleteLandmarkPostgres(unitId, landmarkId);
-}
-
-async function getAdminLessonsPostgres(unitId) {
-  const query = unitId
-    ? 'SELECT l.*, u.title_kz as unit_title FROM lessons l JOIN units u ON l.unit_id=u.id WHERE l.unit_id=$1 ORDER BY l.order_num'
-    : 'SELECT l.*, u.title_kz as unit_title FROM lessons l JOIN units u ON l.unit_id=u.id ORDER BY l.unit_id, l.order_num';
-  const result = await pool.query(query, unitId ? [unitId] : []);
-  return result.rows;
+  return deleteLandmarkMongo(unitId, landmarkId);
 }
 
 async function getAdminLessonsMongo(unitId) {
@@ -856,16 +632,6 @@ async function getAdminLessonsMongo(unitId) {
   return lessons.map((lessonDoc) => serializeLesson(lessonDoc, lessonDoc.unitId));
 }
 
-async function createLessonPostgres(payload) {
-  const result = await pool.query(
-    'INSERT INTO lessons (unit_id,title,type,xp_reward,order_num) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-    [payload.unit_id, payload.title, payload.type, payload.xp_reward || 10, payload.order_num]
-  );
-  await pool.query('UPDATE units SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE unit_id=$1) WHERE id=$1', [payload.unit_id]);
-
-  return result.rows[0];
-}
-
 async function createLessonMongo(payload) {
   const { Unit, Lesson } = await getMongoModels();
   const unitDoc = await findUnitByIdentifier(Unit, payload.unit_id);
@@ -879,21 +645,12 @@ async function createLessonMongo(payload) {
     type: payload.type,
     xpReward: payload.xp_reward || 10,
     orderNum: payload.order_num,
+    content: payload.content || null,
   });
 
   await updateUnitLessonCount(Unit, Lesson, unitDoc);
 
   return serializeLesson(lessonDoc, unitDoc);
-}
-
-async function updateLessonPostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE lessons SET unit_id=$1,title=$2,type=$3,xp_reward=$4,order_num=$5 WHERE id=$6 RETURNING *',
-    [payload.unit_id, payload.title, payload.type, payload.xp_reward || 10, payload.order_num, id]
-  );
-  await pool.query('UPDATE units SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE unit_id=$1) WHERE id=$1', [payload.unit_id]);
-
-  return result.rows[0] || null;
 }
 
 async function updateLessonMongo(id, payload) {
@@ -913,6 +670,7 @@ async function updateLessonMongo(id, payload) {
         type: payload.type,
         xpReward: payload.xp_reward || 10,
         orderNum: payload.order_num,
+        content: payload.content !== undefined ? (payload.content || null) : undefined,
       },
     },
     { new: true }
@@ -931,16 +689,6 @@ async function updateLessonMongo(id, payload) {
   return lessonDoc ? serializeLesson(lessonDoc, targetUnit) : null;
 }
 
-async function deleteLessonPostgres(id) {
-  const lesson = await pool.query('SELECT unit_id FROM lessons WHERE id=$1', [id]);
-  await pool.query('DELETE FROM lessons WHERE id=$1', [id]);
-  if (lesson.rows[0]) {
-    await pool.query('UPDATE units SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE unit_id=$1) WHERE id=$1', [lesson.rows[0].unit_id]);
-  }
-
-  return { success: true };
-}
-
 async function deleteLessonMongo(id) {
   const { Unit, Lesson, Exercise, UserLessonProgress } = await getMongoModels();
   const lessonDoc = await findLessonByIdentifier(Lesson, id);
@@ -954,14 +702,6 @@ async function deleteLessonMongo(id) {
   await updateUnitLessonCount(Unit, Lesson, unitDoc);
 
   return { success: true };
-}
-
-async function getAdminExercisesPostgres(lessonId) {
-  const query = lessonId
-    ? 'SELECT e.*, l.title as lesson_title FROM exercises e JOIN lessons l ON e.lesson_id=l.id WHERE e.lesson_id=$1 ORDER BY e.order_num'
-    : 'SELECT e.*, l.title as lesson_title FROM exercises e JOIN lessons l ON e.lesson_id=l.id ORDER BY e.lesson_id, e.order_num';
-  const result = await pool.query(query, lessonId ? [lessonId] : []);
-  return result.rows;
 }
 
 async function getAdminExercisesMongo(lessonId) {
@@ -985,23 +725,6 @@ async function getAdminExercisesMongo(lessonId) {
   return exercises.map((exerciseDoc) => serializeExercise(exerciseDoc, exerciseDoc.lessonId));
 }
 
-async function createExercisePostgres(payload) {
-  const result = await pool.query(
-    'INSERT INTO exercises (lesson_id,type,question,options,correct_answer,explanation,order_num) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
-    [
-      payload.lesson_id,
-      payload.type,
-      payload.question,
-      payload.options ? JSON.stringify(payload.options) : null,
-      payload.correct_answer,
-      payload.explanation,
-      payload.order_num,
-    ]
-  );
-
-  return result.rows[0];
-}
-
 async function createExerciseMongo(payload) {
   const { Lesson, Exercise } = await getMongoModels();
   const lessonDoc = await findLessonByIdentifier(Lesson, payload.lesson_id);
@@ -1020,24 +743,6 @@ async function createExerciseMongo(payload) {
   });
 
   return serializeExercise(exerciseDoc, lessonDoc);
-}
-
-async function updateExercisePostgres(id, payload) {
-  const result = await pool.query(
-    'UPDATE exercises SET lesson_id=$1,type=$2,question=$3,options=$4,correct_answer=$5,explanation=$6,order_num=$7 WHERE id=$8 RETURNING *',
-    [
-      payload.lesson_id,
-      payload.type,
-      payload.question,
-      payload.options ? JSON.stringify(payload.options) : null,
-      payload.correct_answer,
-      payload.explanation,
-      payload.order_num,
-      id,
-    ]
-  );
-
-  return result.rows[0] || null;
 }
 
 async function updateExerciseMongo(id, payload) {
@@ -1066,11 +771,6 @@ async function updateExerciseMongo(id, payload) {
   return exerciseDoc ? serializeExercise(exerciseDoc, lessonDoc) : null;
 }
 
-async function deleteExercisePostgres(id) {
-  await pool.query('DELETE FROM exercises WHERE id=$1', [id]);
-  return { success: true };
-}
-
 async function deleteExerciseMongo(id) {
   const { Exercise } = await getMongoModels();
   const criteria = buildRootIdCriteria(id);
@@ -1079,26 +779,6 @@ async function deleteExerciseMongo(id) {
 
   await Exercise.deleteOne(criteria);
   return { success: true };
-}
-
-async function getAdminStatsPostgres() {
-  const [levels, modules, units, lessons, exercises, users] = await Promise.all([
-    pool.query('SELECT COUNT(*) FROM levels'),
-    pool.query('SELECT COUNT(*) FROM modules'),
-    pool.query('SELECT COUNT(*) FROM units'),
-    pool.query('SELECT COUNT(*) FROM lessons'),
-    pool.query('SELECT COUNT(*) FROM exercises'),
-    pool.query('SELECT COUNT(*) FROM users'),
-  ]);
-
-  return {
-    levels: parseInt(levels.rows[0].count, 10),
-    modules: parseInt(modules.rows[0].count, 10),
-    units: parseInt(units.rows[0].count, 10),
-    lessons: parseInt(lessons.rows[0].count, 10),
-    exercises: parseInt(exercises.rows[0].count, 10),
-    users: parseInt(users.rows[0].count, 10),
-  };
 }
 
 async function getAdminStatsMongo() {
@@ -1123,111 +803,111 @@ async function getAdminStatsMongo() {
 }
 
 async function getAdminLevels() {
-  return isMongoProvider() ? getAdminLevelsMongo() : getAdminLevelsPostgres();
+  return getAdminLevelsMongo();
 }
 
 async function createLevel(payload) {
-  return isMongoProvider() ? createLevelMongo(payload) : createLevelPostgres(payload);
+  return createLevelMongo(payload);
 }
 
 async function updateLevel(id, payload) {
-  return isMongoProvider() ? updateLevelMongo(id, payload) : updateLevelPostgres(id, payload);
+  return updateLevelMongo(id, payload);
 }
 
 async function deleteLevel(id) {
-  return isMongoProvider() ? deleteLevelMongo(id) : deleteLevelPostgres(id);
+  return deleteLevelMongo(id);
 }
 
 async function getAdminModules() {
-  return isMongoProvider() ? getAdminModulesMongo() : getAdminModulesPostgres();
+  return getAdminModulesMongo();
 }
 
 async function createModule(payload) {
-  return isMongoProvider() ? createModuleMongo(payload) : createModulePostgres(payload);
+  return createModuleMongo(payload);
 }
 
 async function updateModule(id, payload) {
-  return isMongoProvider() ? updateModuleMongo(id, payload) : updateModulePostgres(id, payload);
+  return updateModuleMongo(id, payload);
 }
 
 async function deleteModule(id) {
-  return isMongoProvider() ? deleteModuleMongo(id) : deleteModulePostgres(id);
+  return deleteModuleMongo(id);
 }
 
 async function getAdminUnits() {
-  return isMongoProvider() ? getAdminUnitsMongo() : getAdminUnitsPostgres();
+  return getAdminUnitsMongo();
 }
 
 async function createUnit(payload) {
-  return isMongoProvider() ? createUnitMongo(payload) : createUnitPostgres(payload);
+  return createUnitMongo(payload);
 }
 
 async function updateUnit(id, payload) {
-  return isMongoProvider() ? updateUnitMongo(id, payload) : updateUnitPostgres(id, payload);
+  return updateUnitMongo(id, payload);
 }
 
 async function deleteUnit(id) {
-  return isMongoProvider() ? deleteUnitMongo(id) : deleteUnitPostgres(id);
+  return deleteUnitMongo(id);
 }
 
 async function saveUnitLayout(id, payload) {
-  return updateUnitLayout(id, payload);
+  return updateUnitLayoutMongo(id, payload);
 }
 
 async function saveUnitPathImage(id, imageUrl) {
-  return uploadUnitPathImage(id, imageUrl);
+  return uploadUnitPathImageMongo(id, imageUrl);
 }
 
 async function removeUnitPathImage(id) {
-  return deleteUnitPathImage(id);
+  return deleteUnitPathImageMongo(id);
 }
 
 async function createUnitLandmark(unitId, payload) {
-  return createLandmark(unitId, payload);
+  return createLandmarkMongo(unitId, payload);
 }
 
 async function updateUnitLandmark(unitId, landmarkId, payload) {
-  return updateLandmark(unitId, landmarkId, payload);
+  return updateLandmarkMongo(unitId, landmarkId, payload);
 }
 
 async function deleteUnitLandmark(unitId, landmarkId) {
-  return deleteLandmark(unitId, landmarkId);
+  return deleteLandmarkMongo(unitId, landmarkId);
 }
 
 async function getAdminLessons(unitId) {
-  return isMongoProvider() ? getAdminLessonsMongo(unitId) : getAdminLessonsPostgres(unitId);
+  return getAdminLessonsMongo(unitId);
 }
 
 async function createLesson(payload) {
-  return isMongoProvider() ? createLessonMongo(payload) : createLessonPostgres(payload);
+  return createLessonMongo(payload);
 }
 
 async function updateLesson(id, payload) {
-  return isMongoProvider() ? updateLessonMongo(id, payload) : updateLessonPostgres(id, payload);
+  return updateLessonMongo(id, payload);
 }
 
 async function deleteLesson(id) {
-  return isMongoProvider() ? deleteLessonMongo(id) : deleteLessonPostgres(id);
+  return deleteLessonMongo(id);
 }
 
 async function getAdminExercises(lessonId) {
-  return isMongoProvider() ? getAdminExercisesMongo(lessonId) : getAdminExercisesPostgres(lessonId);
+  return getAdminExercisesMongo(lessonId);
 }
 
 async function createExercise(payload) {
-  return isMongoProvider() ? createExerciseMongo(payload) : createExercisePostgres(payload);
+  return createExerciseMongo(payload);
 }
 
 async function updateExercise(id, payload) {
-  return isMongoProvider() ? updateExerciseMongo(id, payload) : updateExercisePostgres(id, payload);
+  return updateExerciseMongo(id, payload);
 }
 
 async function deleteExercise(id) {
-  return isMongoProvider() ? deleteExerciseMongo(id) : deleteExercisePostgres(id);
+  return deleteExerciseMongo(id);
 }
 
 async function getAdminStats() {
-  return isMongoProvider() ? getAdminStatsMongo() : getAdminStatsPostgres();
+  return getAdminStatsMongo();
 }
 
 module.exports = {

@@ -296,18 +296,18 @@ router.get('/lessons', async (req, res) => {
 });
 
 router.post('/lessons', async (req, res) => {
-  const { unit_id, title, type, xp_reward, order_num } = req.body;
+  const { unit_id, title, type, xp_reward, order_num, content } = req.body;
   try {
-    const lesson = await adminRepository.createLesson({ unit_id, title, type, xp_reward, order_num });
+    const lesson = await adminRepository.createLesson({ unit_id, title, type, xp_reward, order_num, content });
     if (!lesson) return res.status(404).json({ error: 'Раздел не найден' });
     res.status(201).json(lesson);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.put('/lessons/:id', async (req, res) => {
-  const { unit_id, title, type, xp_reward, order_num } = req.body;
+  const { unit_id, title, type, xp_reward, order_num, content } = req.body;
   try {
-    const lesson = await adminRepository.updateLesson(req.params.id, { unit_id, title, type, xp_reward, order_num });
+    const lesson = await adminRepository.updateLesson(req.params.id, { unit_id, title, type, xp_reward, order_num, content });
     if (!lesson) return res.status(404).json({ error: 'Урок не найден' });
     res.json(lesson);
   } catch (err) { res.status(500).json({ error: err.message }); }

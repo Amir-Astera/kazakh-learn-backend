@@ -7,6 +7,7 @@ const lessonSchema = new Schema(
     title: { type: String, required: true, trim: true },
     type: { type: String, enum: lessonTypeValues, required: true },
     xpReward: { type: Number, default: 10, min: 0 },
+    content: { type: String, default: null },
     orderNum: { type: Number, required: true, min: 1 },
   },
   {

@@ -18,6 +18,9 @@ router.get('/unit/:unitId', authMiddleware, async (req, res) => {
     const lessons = await getLessonsForUnit(unitId, userId);
     res.json(lessons);
   } catch (err) {
+    if (err?.code === 'UNIT_LOCKED') {
+      return res.status(403).json({ error: 'Сначала завершите предыдущий раздел' });
+    }
     console.error('Get lessons error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
@@ -27,14 +30,18 @@ router.get('/unit/:unitId', authMiddleware, async (req, res) => {
 router.get('/:lessonId', authMiddleware, async (req, res) => {
   try {
     const { lessonId } = req.params;
+    const userId = req.user.id;
 
-    const lesson = await getLessonByIdWithExercises(lessonId);
+    const lesson = await getLessonByIdWithExercises(lessonId, userId);
     if (!lesson) {
       return res.status(404).json({ error: 'Урок не найден' });
     }
 
     res.json(lesson);
   } catch (err) {
+    if (err?.code === 'UNIT_LOCKED') {
+      return res.status(403).json({ error: 'Сначала завершите предыдущий раздел' });
+    }
     console.error('Get lesson error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
@@ -44,9 +51,10 @@ router.get('/:lessonId', authMiddleware, async (req, res) => {
 router.post('/:lessonId/answer', authMiddleware, async (req, res) => {
   try {
     const { lessonId } = req.params;
+    const userId = req.user.id;
     const { exerciseId, answer } = req.body;
 
-    const exercise = await getExerciseAnswerContext(lessonId, exerciseId);
+    const exercise = await getExerciseAnswerContext(lessonId, exerciseId, userId);
     if (!exercise) {
       return res.status(404).json({ error: 'Упражнение не найдено' });
     }
@@ -60,6 +68,9 @@ router.post('/:lessonId/answer', authMiddleware, async (req, res) => {
       explanation: exercise.explanation,
     });
   } catch (err) {
+    if (err?.code === 'UNIT_LOCKED') {
+      return res.status(403).json({ error: 'Сначала завершите предыдущий раздел' });
+    }
     console.error('Submit answer error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
@@ -78,6 +89,9 @@ router.post('/:lessonId/complete', authMiddleware, async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    if (err?.code === 'UNIT_LOCKED') {
+      return res.status(403).json({ error: 'Сначала завершите предыдущий раздел' });
+    }
     console.error('Complete lesson error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }

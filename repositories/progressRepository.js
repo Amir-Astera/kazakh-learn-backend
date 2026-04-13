@@ -1,6 +1,3 @@
-const pool = require('../config/db');
-const { isMongoProvider } = require('../config/dbProvider');
-
 let mongooseModule = null;
 
 function getMongooseModule() {
@@ -135,58 +132,6 @@ function buildReminder(weakestSkill) {
   };
 }
 
-async function getDashboardDataPostgres(userId) {
-  const user = await pool.query(
-    'SELECT id, name, xp, streak, last_activity FROM users WHERE id = $1',
-    [userId]
-  );
-
-  const skills = await pool.query(
-    'SELECT skill_name, progress FROM user_skills WHERE user_id = $1',
-    [userId]
-  );
-
-  const quests = await pool.query(
-    `SELECT * FROM user_quests
-     WHERE user_id = $1
-     ORDER BY completed ASC, created_at DESC
-     LIMIT 5`,
-    [userId]
-  );
-
-  const recentLessons = await pool.query(
-    "SELECT COUNT(*) as cnt FROM user_lesson_progress WHERE user_id = $1 AND completed_at > NOW() - INTERVAL '7 days'",
-    [userId]
-  );
-
-  const weakestSkill = await pool.query(
-    'SELECT skill_name, progress FROM user_skills WHERE user_id = $1 ORDER BY progress ASC LIMIT 1',
-    [userId]
-  );
-
-  let reminder = null;
-  if (weakestSkill.rows.length > 0 && weakestSkill.rows[0].progress < 50) {
-    const skillNames = {
-      vocabulary: 'словарный запас',
-      grammar: 'грамматику',
-      listening: 'аудирование',
-      speaking: 'произношение',
-    };
-    reminder = {
-      title: 'Умная подсказка',
-      message: `Подтяните ${skillNames[weakestSkill.rows[0].skill_name] || weakestSkill.rows[0].skill_name}. Пройдите 2-минутный урок для закрепления!`,
-    };
-  }
-
-  return {
-    user: user.rows[0],
-    skills: skills.rows,
-    quests: quests.rows,
-    recent_lessons: parseInt(recentLessons.rows[0].cnt, 10),
-    reminder,
-  };
-}
-
 async function getDashboardDataMongo(userId) {
   const { User, UserSkill, UserQuest, UserLessonProgress } = await getMongoModels();
   const userCriteria = buildUserCriteria(userId);
@@ -230,35 +175,6 @@ async function getDashboardDataMongo(userId) {
     quests: quests.map((quest) => serializeQuest(quest, user)),
     recent_lessons: recentLessons,
     reminder: buildReminder(weakestSkill),
-  };
-}
-
-async function getUserStatsPostgres(userId) {
-  const totalLessons = await pool.query(
-    'SELECT COUNT(*) as cnt FROM user_lesson_progress WHERE user_id = $1 AND completed = true',
-    [userId]
-  );
-
-  const totalXP = await pool.query(
-    'SELECT xp FROM users WHERE id = $1',
-    [userId]
-  );
-
-  const avgScore = await pool.query(
-    'SELECT ROUND(AVG(score)) as avg_score FROM user_lesson_progress WHERE user_id = $1 AND completed = true',
-    [userId]
-  );
-
-  const completedUnits = await pool.query(
-    "SELECT COUNT(*) as cnt FROM user_progress WHERE user_id = $1 AND status = 'completed'",
-    [userId]
-  );
-
-  return {
-    total_lessons: parseInt(totalLessons.rows[0].cnt, 10),
-    total_xp: totalXP.rows[0].xp,
-    avg_score: parseInt(avgScore.rows[0].avg_score, 10) || 0,
-    completed_units: parseInt(completedUnits.rows[0].cnt, 10),
   };
 }
 
@@ -308,14 +224,6 @@ async function getUserStatsMongo(userId) {
   };
 }
 
-async function getRatingPostgres() {
-  const result = await pool.query(
-    'SELECT id, name, xp, streak FROM users WHERE is_admin = FALSE ORDER BY xp DESC LIMIT 50'
-  );
-
-  return result.rows;
-}
-
 async function getRatingMongo() {
   const { User } = await getMongoModels();
   const users = await User.find({ isAdmin: false })
@@ -332,15 +240,15 @@ async function getRatingMongo() {
 }
 
 async function getDashboardData(userId) {
-  return isMongoProvider() ? getDashboardDataMongo(userId) : getDashboardDataPostgres(userId);
+  return getDashboardDataMongo(userId);
 }
 
 async function getUserStats(userId) {
-  return isMongoProvider() ? getUserStatsMongo(userId) : getUserStatsPostgres(userId);
+  return getUserStatsMongo(userId);
 }
 
 async function getRating() {
-  return isMongoProvider() ? getRatingMongo() : getRatingPostgres();
+  return getRatingMongo();
 }
 
 module.exports = {
