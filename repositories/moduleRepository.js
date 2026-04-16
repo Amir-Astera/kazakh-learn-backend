@@ -79,6 +79,7 @@ async function getMongoModels() {
   const Unit = require('../models/Unit');
   const Lesson = require('../models/Lesson');
   const UserUnitProgress = require('../models/UserUnitProgress');
+  const User = require('../models/User');
   const { getMongoose } = require('../config/mongo');
   return {
     Level,
@@ -86,6 +87,7 @@ async function getMongoModels() {
     Unit,
     Lesson,
     UserUnitProgress,
+    User,
     mongoose: getMongoose(),
   };
 }
@@ -127,6 +129,33 @@ function buildMongoUserProgressCriteria(userId) {
   return criteria.length === 1 ? criteria[0] : { $or: criteria };
 }
 
+/** Match progress rows for this user whether they were keyed by Mongo userId, legacy user id, or both. */
+function buildMongoUserProgressCriteriaFromUserDoc(userDoc) {
+  if (!userDoc) {
+    return null;
+  }
+
+  const parts = [];
+  if (userDoc._id) {
+    parts.push({ userId: userDoc._id });
+  }
+  const legacy = userDoc.legacyId != null ? parseLegacyId(userDoc.legacyId) : null;
+  if (legacy != null) {
+    parts.push({ legacyUserId: legacy });
+  }
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.length === 1 ? parts[0] : { $or: parts };
+}
+
+function scoreUnitProgressDoc(doc) {
+  const statusRank = doc.status === 'completed' ? 3 : doc.status === 'current' ? 2 : 1;
+  return statusRank * 1e6 + (doc.completedLessons || 0) * 1e3 + (doc.stars || 0);
+}
+
 async function findMongoModuleByIdentifier(Module, mongoose, moduleId) {
   const legacyId = parseLegacyId(moduleId);
   if (legacyId != null) {
@@ -142,7 +171,7 @@ async function findMongoModuleByIdentifier(Module, mongoose, moduleId) {
 }
 
 async function getModuleByIdForUserMongo(moduleId, userId) {
-  const { Module, Unit, Lesson, UserUnitProgress, mongoose } = await getMongoModels();
+  const { Module, Unit, Lesson, UserUnitProgress, User, mongoose } = await getMongoModels();
   const moduleDoc = await findMongoModuleByIdentifier(Module, mongoose, moduleId);
 
   if (!moduleDoc) {
@@ -185,9 +214,10 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
           : userProgressCriteria
       ).lean()
     : [];
-  const hasAnyUnitProgress = userProgressCriteria
-    ? await UserUnitProgress.exists(userProgressCriteria)
-    : false;
+  // Only treat as "has progress" when it matches *this module's* units. Otherwise users
+  // with orphaned rows (after admin deleted/recreated units) would skip the unlock fallback
+  // and every unit would stay locked — lessons never load (403).
+  const hasAnyUnitProgress = progressDocs.length > 0;
 
   const progressByUnitId = new Map();
   for (const progress of progressDocs) {
@@ -205,8 +235,10 @@ async function getModuleByIdForUserMongo(moduleId, userId) {
     return serializeUnit(unit, progress, actualLessonCount);
   });
 
-  if (!hasAnyUnitProgress) {
+  const everyLocked = serializedUnits.length > 0 && serializedUnits.every((u) => u.status === 'locked');
+  if (!hasAnyUnitProgress || everyLocked) {
     applyCurrentUnitFallback(serializedUnits);
+    await persistCurrentUnitsFromSerialized(userId, units, serializedUnits, UserUnitProgress, User);
   }
 
   return {
@@ -259,6 +291,98 @@ function applyCurrentUnitFallback(units) {
     if (units[index].status === 'completed' && units[index + 1].status === 'locked') {
       units[index + 1].status = 'current';
       break;
+    }
+  }
+}
+
+function findUnitLeanBySerializedId(units, serializedId) {
+  const num = Number(serializedId);
+  if (Number.isInteger(num) && num > 0) {
+    const byLegacy = units.find((u) => u.legacyId === num);
+    if (byLegacy) return byLegacy;
+  }
+
+  const { Types } = getMongooseModule();
+  const sid = String(serializedId);
+  if (Types.ObjectId.isValid(sid)) {
+    return units.find((u) => String(u._id) === sid) || null;
+  }
+
+  return null;
+}
+
+async function persistCurrentUnitsFromSerialized(userId, unitsLean, serializedUnits, UserUnitProgress, User) {
+  const userCriteria = buildMongoUserProgressCriteria(userId);
+  if (!userCriteria) {
+    return;
+  }
+
+  const userDoc = await User.findOne(userCriteria).lean();
+  if (!userDoc) {
+    return;
+  }
+
+  const userMatch = buildMongoUserProgressCriteriaFromUserDoc(userDoc);
+  if (!userMatch) {
+    return;
+  }
+
+  const currentSerialized = serializedUnits.filter((u) => u.status === 'current');
+  for (const su of currentSerialized) {
+    const unitLean = findUnitLeanBySerializedId(unitsLean, su.id);
+    if (!unitLean) {
+      continue;
+    }
+
+    const unitOr = [];
+    if (unitLean._id) {
+      unitOr.push({ unitId: unitLean._id });
+    }
+    if (unitLean.legacyId != null) {
+      unitOr.push({ legacyUnitId: unitLean.legacyId });
+    }
+    if (unitOr.length === 0) {
+      continue;
+    }
+
+    const unitMatch = unitOr.length === 1 ? unitOr[0] : { $or: unitOr };
+    const allForUnit = await UserUnitProgress.find({ $and: [userMatch, unitMatch] }).lean();
+    if (allForUnit.some((row) => row.status === 'completed')) {
+      continue;
+    }
+
+    if (allForUnit.length > 1) {
+      const keep = [...allForUnit].sort((a, b) => scoreUnitProgressDoc(b) - scoreUnitProgressDoc(a))[0];
+      await UserUnitProgress.deleteMany({
+        _id: {
+          $in: allForUnit.filter((row) => String(row._id) !== String(keep._id)).map((row) => row._id),
+        },
+      });
+    }
+
+    const lessonCount = su.lesson_count || 0;
+    const completedLessons = lessonCount > 0 ? Math.min(su.completed_lessons || 0, lessonCount) : su.completed_lessons || 0;
+    const stars = Math.min(Math.max(su.stars || 0, 0), 3);
+
+    const setPayload = {
+      userId: userDoc._id,
+      legacyUserId: userDoc.legacyId ?? null,
+      unitId: unitLean._id,
+      legacyUnitId: unitLean.legacyId ?? null,
+      status: 'current',
+      completedLessons,
+      stars,
+    };
+
+    const [kept] = await UserUnitProgress.find({ $and: [userMatch, unitMatch] }).lean();
+    if (kept) {
+      await UserUnitProgress.updateOne({ _id: kept._id }, { $set: setPayload });
+    } else {
+      await UserUnitProgress.updateOne(
+        { userId: userDoc._id, unitId: unitLean._id },
+        { $set: setPayload },
+        { upsert: true }
+      );
     }
   }
 }

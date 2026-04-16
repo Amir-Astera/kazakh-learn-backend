@@ -1,4 +1,6 @@
 require('dotenv').config();
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 let mongooseModule = null;
 
@@ -251,23 +253,54 @@ async function getCurrentUserById(userId) {
   };
 }
 
+async function setUserAvatarUrl(userId, relativeUrl) {
+  const { User } = await getMongoModels();
+  const criteria = buildUserIdCriteria(userId);
+  if (!criteria) return null;
+
+  await User.updateOne(criteria, {
+    $set: { avatarUrl: relativeUrl ? String(relativeUrl).trim() : null },
+  });
+
+  return getCurrentUserById(userId);
+}
+
 async function updateUserProfile(userId, payload) {
   const { User } = await getMongoModels();
   const criteria = buildUserIdCriteria(userId);
   if (!criteria) return null;
 
-  const update = {
-    name: String(payload.name || '').trim(),
-    avatarUrl: payload.avatar_url ? String(payload.avatar_url).trim() : null,
-    languagePair: payload.language_pair,
-    learningGoal: payload.learning_goal,
-    proficiencyLevel: payload.proficiency_level,
-  };
+  const $set = {};
+  if (payload.name !== undefined) {
+    $set.name = String(payload.name || '').trim();
+  }
+  if (payload.avatar_url !== undefined) {
+    $set.avatarUrl = payload.avatar_url ? String(payload.avatar_url).trim() : null;
+  }
+  if (payload.language_pair !== undefined) {
+    $set.languagePair = ['ru-kz', 'en-kz'].includes(String(payload.language_pair || '').trim().toLowerCase())
+      ? String(payload.language_pair).trim().toLowerCase()
+      : 'ru-kz';
+  }
+  if (payload.learning_goal !== undefined) {
+    $set.learningGoal = ['general', 'travel', 'study', 'work'].includes(String(payload.learning_goal || '').trim().toLowerCase())
+      ? String(payload.learning_goal).trim().toLowerCase()
+      : 'general';
+  }
+  if (payload.proficiency_level !== undefined && payload.proficiency_level !== null) {
+    $set.proficiencyLevel = ['beginner', 'elementary', 'intermediate'].includes(String(payload.proficiency_level || '').trim().toLowerCase())
+      ? String(payload.proficiency_level).trim().toLowerCase()
+      : 'beginner';
+  }
+
+  if (Object.keys($set).length === 0) {
+    return getCurrentUserById(userId);
+  }
 
   const user = await User.findOneAndUpdate(
     criteria,
     {
-      $set: update,
+      $set: $set,
     },
     { new: true }
   ).lean();
@@ -331,8 +364,22 @@ async function findOrCreateGoogleUser({ googleId, email, name, avatarUrl }) {
 
   let user = await User.findOne({ googleId }).lean();
   if (user) {
-    await User.updateOne({ _id: user._id }, { $set: { lastActivity: new Date() } });
-    return normalizeAuthUser({ ...user, lastActivity: new Date() });
+    const fromGoogle = avatarUrl ? String(avatarUrl).trim() : '';
+    const nextAvatar = fromGoogle || (user.avatarUrl ? String(user.avatarUrl).trim() : '') || null;
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          lastActivity: new Date(),
+          ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
+        },
+      }
+    );
+    return normalizeAuthUser({
+      ...user,
+      lastActivity: new Date(),
+      avatarUrl: nextAvatar || user.avatarUrl,
+    });
   }
 
   user = await User.findOne({ email: String(email).trim().toLowerCase() }).lean();
@@ -387,12 +434,74 @@ async function findOrCreateGoogleUser({ googleId, email, name, avatarUrl }) {
   return normalizeAuthUser(newUser);
 }
 
+async function createPasswordResetForEmail(email) {
+  const { User } = await getMongoModels();
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) {
+    return { rawToken: null };
+  }
+
+  const user = await User.findOne({ email: normalized }).lean();
+  if (!user || !user.passwordHash) {
+    return { rawToken: null };
+  }
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const expires = new Date(Date.now() + 60 * 60 * 1000);
+
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $set: {
+        passwordResetTokenHash: hash,
+        passwordResetExpires: expires,
+      },
+    }
+  );
+
+  return { rawToken };
+}
+
+async function resetPasswordWithToken(rawToken, newPassword) {
+  const { User } = await getMongoModels();
+  const token = String(rawToken || '').trim();
+  const password = String(newPassword || '');
+  if (!token || password.length < 6) {
+    return { ok: false, error: 'invalid' };
+  }
+
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  const user = await User.findOne({
+    passwordResetTokenHash: hash,
+    passwordResetExpires: { $gt: new Date() },
+  }).lean();
+
+  if (!user) {
+    return { ok: false, error: 'token' };
+  }
+
+  const passwordHash = await bcrypt.hash(password, await bcrypt.genSalt(10));
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $set: { passwordHash },
+      $unset: { passwordResetTokenHash: '', passwordResetExpires: '' },
+    }
+  );
+
+  return { ok: true };
+}
+
 module.exports = {
   findUserByEmail,
   createUserWithDefaults,
   updateUserLoginState,
   getCurrentUserById,
   updateUserProfile,
+  setUserAvatarUrl,
   findOrCreateGoogleUser,
   completeOnboardingSurvey,
+  createPasswordResetForEmail,
+  resetPasswordWithToken,
 };

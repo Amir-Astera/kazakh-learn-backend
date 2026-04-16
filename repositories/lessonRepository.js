@@ -16,6 +16,7 @@ function parseLegacyId(value) {
 
 async function getMongoModels() {
   const User = require('../models/User');
+  const Level = require('../models/Level');
   const Unit = require('../models/Unit');
   const Module = require('../models/Module');
   const Lesson = require('../models/Lesson');
@@ -27,6 +28,7 @@ async function getMongoModels() {
 
   return {
     User,
+    Level,
     Unit,
     Module,
     Lesson,
@@ -39,23 +41,165 @@ async function getMongoModels() {
   };
 }
 
-function buildUserCriteria(userId) {
-  const criteria = [];
-  const legacyUserId = parseLegacyId(userId);
-  if (legacyUserId != null) {
-    criteria.push({ legacyUserId });
-  }
-
-  const { Types } = getMongooseModule();
-  if (Types.ObjectId.isValid(String(userId))) {
-    criteria.push({ userId: new Types.ObjectId(String(userId)) });
-  }
-
-  if (criteria.length === 0) {
+function buildUserCriteriaFromUserDoc(userDoc) {
+  if (!userDoc) {
     return null;
   }
 
-  return criteria.length === 1 ? criteria[0] : { $or: criteria };
+  const parts = [];
+  if (userDoc._id) {
+    parts.push({ userId: userDoc._id });
+  }
+  const legacy = userDoc.legacyId != null ? parseLegacyId(userDoc.legacyId) : null;
+  if (legacy != null) {
+    parts.push({ legacyUserId: legacy });
+  }
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.length === 1 ? parts[0] : { $or: parts };
+}
+
+function unitDocMatches(a, b) {
+  if (!a || !b) {
+    return false;
+  }
+  if (String(a._id) === String(b._id)) {
+    return true;
+  }
+  if (a.legacyId != null && b.legacyId != null && a.legacyId === b.legacyId) {
+    return true;
+  }
+  return false;
+}
+
+async function getGloballyOrderedUnitsLean() {
+  const { Level, Module, Unit } = await getMongoModels();
+  const [levels, modules, units] = await Promise.all([
+    Level.find().sort({ orderNum: 1 }).lean(),
+    Module.find().lean(),
+    Unit.find().lean(),
+  ]);
+
+  const levelOrder = new Map(levels.map((level) => [String(level._id), level.orderNum ?? 0]));
+  const modulesSorted = [...modules].sort((a, b) => {
+    const la = levelOrder.get(String(a.levelId)) ?? 0;
+    const lb = levelOrder.get(String(b.levelId)) ?? 0;
+    if (la !== lb) {
+      return la - lb;
+    }
+    return (a.orderNum || 0) - (b.orderNum || 0);
+  });
+
+  const orderedUnits = [];
+  for (const mod of modulesSorted) {
+    const modUnits = units
+      .filter((u) => String(u.moduleId) === String(mod._id))
+      .sort((a, b) => (a.orderNum || 0) - (b.orderNum || 0));
+    for (const u of modUnits) {
+      orderedUnits.push(u);
+    }
+  }
+
+  return orderedUnits;
+}
+
+async function tryUnlockFromGlobalPriorUnit(userId, unitDoc) {
+  const { User, UserUnitProgress } = await getMongoModels();
+  const userDoc = await findUserByIdentifier(User, userId);
+  if (!userDoc) {
+    return;
+  }
+
+  const userMatch = buildUserCriteriaFromUserDoc(userDoc);
+  if (!userMatch) {
+    return;
+  }
+
+  const chain = await getGloballyOrderedUnitsLean();
+  const idx = chain.findIndex((u) => unitDocMatches(u, unitDoc));
+  if (idx === -1) {
+    return;
+  }
+
+  if (idx === 0) {
+    const unitCrit = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
+    await UserUnitProgress.updateOne(
+      combineCriteria(userMatch, unitCrit),
+      {
+        $set: {
+          userId: userDoc._id,
+          legacyUserId: userDoc.legacyId ?? null,
+          unitId: unitDoc._id,
+          legacyUnitId: unitDoc.legacyId ?? null,
+          status: 'current',
+          completedLessons: 0,
+          stars: 0,
+        },
+      },
+      { upsert: true }
+    );
+    return;
+  }
+
+  const prev = chain[idx - 1];
+  const prevCrit = buildLinkedCriteria('unitId', 'legacyUnitId', [prev._id], [prev.legacyId]);
+  const prevProg = await UserUnitProgress.findOne(combineCriteria(userMatch, prevCrit)).lean();
+  if (prevProg?.status !== 'completed') {
+    return;
+  }
+
+  const unitCrit = buildLinkedCriteria('unitId', 'legacyUnitId', [unitDoc._id], [unitDoc.legacyId]);
+  await UserUnitProgress.updateOne(
+    combineCriteria(userMatch, unitCrit),
+    {
+      $set: {
+        userId: userDoc._id,
+        legacyUserId: userDoc.legacyId ?? null,
+        unitId: unitDoc._id,
+        legacyUnitId: unitDoc.legacyId ?? null,
+        status: 'current',
+      },
+      $setOnInsert: {
+        completedLessons: 0,
+        stars: 0,
+      },
+    },
+    { upsert: true }
+  );
+}
+
+async function findFirstUnitOfNextModuleGlobally(currentModuleId) {
+  const { Module, Unit, Level } = await getMongoModels();
+  const currentModule = await Module.findById(currentModuleId).lean();
+  if (!currentModule) {
+    return null;
+  }
+
+  const [levels, modules] = await Promise.all([
+    Level.find().sort({ orderNum: 1 }).lean(),
+    Module.find().lean(),
+  ]);
+
+  const levelOrder = new Map(levels.map((level) => [String(level._id), level.orderNum ?? 0]));
+  const sorted = [...modules].sort((a, b) => {
+    const la = levelOrder.get(String(a.levelId)) ?? 0;
+    const lb = levelOrder.get(String(b.levelId)) ?? 0;
+    if (la !== lb) {
+      return la - lb;
+    }
+    return (a.orderNum || 0) - (b.orderNum || 0);
+  });
+
+  const curIdx = sorted.findIndex((m) => String(m._id) === String(currentModule._id));
+  if (curIdx === -1 || curIdx + 1 >= sorted.length) {
+    return null;
+  }
+
+  const nextMod = sorted[curIdx + 1];
+  return Unit.findOne({ moduleId: nextMod._id }).sort({ orderNum: 1 }).lean();
 }
 
 function buildRootIdCriteria(id) {
@@ -119,24 +263,13 @@ function calculateLessonXp(baseXp, score, mistakes) {
   return Math.max(1, Math.round(baseXp * 0.6));
 }
 
-let xpCurriculumCache = { at: 0, scale: 1 };
-
-async function getXpCurriculumScale() {
-  const ttlMs = 120000;
-  if (Date.now() - xpCurriculumCache.at < ttlMs && xpCurriculumCache.scale > 0) {
-    return xpCurriculumCache.scale;
+/** Base XP = lesson xpReward from content (no curriculum-wide scaling). */
+function baseXpFromLessonReward(lessonDoc) {
+  const raw = Number(lessonDoc?.xpReward);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.round(raw);
   }
-
-  const { Module, Lesson } = await getMongoModels();
-  const maxMod = await Module.findOne().sort({ requiredXp: -1 }).select('requiredXp').lean();
-  const targetPool = Math.max(520, Number(maxMod?.requiredXp) || 0, 500);
-  const agg = await Lesson.aggregate([
-    { $group: { _id: null, total: { $sum: { $ifNull: ['$xpReward', 0] } } } },
-  ]);
-  const sumBase = Math.max(1, Number(agg[0]?.total) || 1);
-  const scale = targetPool / sumBase;
-  xpCurriculumCache = { at: Date.now(), scale };
-  return scale;
+  return 10;
 }
 
 async function findUserByIdentifier(User, userId) {
@@ -206,7 +339,13 @@ function serializeExercise(exerciseDoc) {
 }
 
 async function getUnitProgressForUser(UserUnitProgress, userId, unitDoc) {
-  const userCriteria = buildUserCriteria(userId);
+  const { User } = await getMongoModels();
+  const userDoc = await findUserByIdentifier(User, userId);
+  if (!userDoc) {
+    return null;
+  }
+
+  const userCriteria = buildUserCriteriaFromUserDoc(userDoc);
   if (!userCriteria || !unitDoc) {
     return null;
   }
@@ -217,7 +356,11 @@ async function getUnitProgressForUser(UserUnitProgress, userId, unitDoc) {
 
 async function assertUnitAccessForUser(userId, unitDoc) {
   const { UserUnitProgress } = await getMongoModels();
-  const progressDoc = await getUnitProgressForUser(UserUnitProgress, userId, unitDoc);
+  let progressDoc = await getUnitProgressForUser(UserUnitProgress, userId, unitDoc);
+  if (!progressDoc || !['current', 'completed'].includes(progressDoc.status)) {
+    await tryUnlockFromGlobalPriorUnit(userId, unitDoc);
+    progressDoc = await getUnitProgressForUser(UserUnitProgress, userId, unitDoc);
+  }
   if (!progressDoc || !['current', 'completed'].includes(progressDoc.status)) {
     const error = new Error('UNIT_LOCKED');
     error.code = 'UNIT_LOCKED';
@@ -228,7 +371,7 @@ async function assertUnitAccessForUser(userId, unitDoc) {
 }
 
 async function getLessonsForUnitMongo(unitId, userId) {
-  const { Unit, Lesson, UserLessonProgress, mongoose } = await getMongoModels();
+  const { Unit, Lesson, UserLessonProgress, User, mongoose } = await getMongoModels();
   const unitDoc = await findUnitByIdentifier(Unit, mongoose, unitId);
   if (!unitDoc) {
     return [];
@@ -237,7 +380,8 @@ async function getLessonsForUnitMongo(unitId, userId) {
   await assertUnitAccessForUser(userId, unitDoc);
 
   const lessons = await Lesson.find({ unitId: unitDoc._id }).sort({ orderNum: 1 }).lean();
-  const userCriteria = buildUserCriteria(userId);
+  const userDoc = await findUserByIdentifier(User, userId);
+  const userCriteria = buildUserCriteriaFromUserDoc(userDoc);
   const lessonObjectIds = lessons.map((lesson) => lesson._id);
   const legacyLessonIds = lessons.map((lesson) => lesson.legacyId).filter((value) => value != null);
   const lessonCriteria = buildLinkedCriteria('lessonId', 'legacyLessonId', lessonObjectIds, legacyLessonIds);
@@ -338,13 +482,11 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
 
   await assertUnitAccessForUser(userId, unitDoc);
 
-  const userCriteria = buildUserCriteria(userId);
+  const userCriteria = buildUserCriteriaFromUserDoc(userDoc);
   const lessonProgressCriteria = buildLinkedCriteria('lessonId', 'legacyLessonId', [lessonDoc._id], [lessonDoc.legacyId]);
   const existingProgress = await UserLessonProgress.findOne(combineCriteria(userCriteria, lessonProgressCriteria)).lean();
 
-  const xpScale = await getXpCurriculumScale();
-  const rawLessonXp = lessonDoc.xpReward || 0;
-  const baseXp = Math.max(5, Math.round(rawLessonXp * xpScale));
+  const baseXp = baseXpFromLessonReward(lessonDoc);
   const awardedLessonXp = calculateLessonXp(baseXp, normalizedScore, normalizedMistakes);
   const previousLessonXp = existingProgress?.xpEarned || 0;
   const xpDelta = Math.max(0, awardedLessonXp - previousLessonXp);
@@ -449,6 +591,37 @@ async function completeLessonForUserMongo(lessonId, userId, payload) {
           },
           { upsert: true }
         );
+      }
+    } else {
+      const firstNextModuleUnit = await findFirstUnitOfNextModuleGlobally(unitDoc.moduleId);
+      if (firstNextModuleUnit) {
+        const nextModUnitCrit = buildLinkedCriteria(
+          'unitId',
+          'legacyUnitId',
+          [firstNextModuleUnit._id],
+          [firstNextModuleUnit.legacyId]
+        );
+        const existingNextModProgress = await UserUnitProgress.findOne(combineCriteria(userCriteria, nextModUnitCrit)).lean();
+
+        if (!existingNextModProgress || existingNextModProgress.status === 'locked') {
+          await UserUnitProgress.updateOne(
+            combineCriteria(userCriteria, nextModUnitCrit),
+            {
+              $set: {
+                userId: userDoc._id,
+                legacyUserId: userDoc.legacyId,
+                unitId: firstNextModuleUnit._id,
+                legacyUnitId: firstNextModuleUnit.legacyId,
+                status: 'current',
+              },
+              $setOnInsert: {
+                completedLessons: 0,
+                stars: 0,
+              },
+            },
+            { upsert: true }
+          );
+        }
       }
     }
   }

@@ -18,6 +18,8 @@ const userSchema = new Schema(
     age: { type: Number, default: null, min: 5, max: 120 },
     weeklyStudyMinutes: { type: Number, default: null, min: 0 },
     onboardingCompleted: { type: Boolean, default: false },
+    passwordResetTokenHash: { type: String, default: null },
+    passwordResetExpires: { type: Date, default: null },
   },
   {
     timestamps: true,

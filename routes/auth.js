@@ -1,5 +1,8 @@
 const express = require('express');
 const https = require('https');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const {
@@ -8,12 +11,37 @@ const {
   updateUserLoginState,
   getCurrentUserById,
   updateUserProfile,
+  setUserAvatarUrl,
   findOrCreateGoogleUser,
   completeOnboardingSurvey,
+  createPasswordResetForEmail,
+  resetPasswordWithToken,
 } = require('../repositories/authRepository');
 const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
+
+const avatarUploadDir = path.join(__dirname, '../uploads/avatars');
+if (!fs.existsSync(avatarUploadDir)) fs.mkdirSync(avatarUploadDir, { recursive: true });
+
+const avatarUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, avatarUploadDir),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '') || '.jpg';
+      const safeExt = /^\.(jpe?g|png|gif|webp)$/i.test(ext) ? ext.toLowerCase() : '.jpg';
+      cb(null, `user-${req.user.id}-${Date.now()}${safeExt}`);
+    },
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!/^image\/(jpeg|pjpeg|png|gif|webp)$/i.test(file.mimetype)) {
+      cb(new Error('INVALID_IMAGE'));
+      return;
+    }
+    cb(null, true);
+  },
+});
 
 const WEEKLY_STUDY_OPTIONS = [5, 10, 15, 20];
 
@@ -85,6 +113,48 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ token, user: safeUser });
   } catch (err) {
     console.error('Register error:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const email = req.body?.email;
+    const { rawToken } = await createPasswordResetForEmail(email);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    const resetUrl = rawToken && process.env.NODE_ENV !== 'production'
+      ? `${frontendUrl}/reset-password?token=${encodeURIComponent(rawToken)}`
+      : null;
+
+    if (resetUrl) {
+      console.log(`[password reset] open: ${resetUrl}`);
+    }
+
+    res.json({
+      message:
+        'Если указанный email зарегистрирован, на него отправлены инструкции по восстановлению пароля.',
+      ...(resetUrl ? { reset_url: resetUrl } : {}),
+    });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body || {};
+    const result = await resetPasswordWithToken(token, password);
+    if (!result.ok) {
+      if (result.error === 'invalid') {
+        return res.status(400).json({ error: 'Неверный токен или пароль не менее 6 символов' });
+      }
+      return res.status(400).json({ error: 'Ссылка недействительна или истекла. Запросите новую.' });
+    }
+    res.json({ message: 'Пароль успешно изменён. Можно войти.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
@@ -182,6 +252,34 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
+router.post('/avatar', authMiddleware, (req, res, next) => {
+  avatarUpload.single('avatar')(req, res, (err) => {
+    if (err) {
+      const msg = err.message === 'INVALID_IMAGE' || err.code === 'LIMIT_FILE_SIZE'
+        ? 'Загрузите изображение до 2 МБ (JPEG, PNG, GIF или WebP).'
+        : 'Не удалось загрузить файл.';
+      return res.status(400).json({ error: msg });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Файл не получен' });
+    }
+
+    const publicPath = `/uploads/avatars/${req.file.filename}`;
+    const user = await setUserAvatarUrl(req.user.id, publicPath);
+    if (!user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+    res.json(user);
+  } catch (err) {
+    console.error('Avatar upload error:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 router.put('/profile', authMiddleware, async (req, res) => {
   try {
     const { name, avatar_url, language_pair, learning_goal, proficiency_level } = req.body || {};
@@ -196,17 +294,22 @@ router.put('/profile', authMiddleware, async (req, res) => {
     const normalizedLearningGoal = ['general', 'travel', 'study', 'work'].includes(String(learning_goal || '').trim().toLowerCase())
       ? String(learning_goal).trim().toLowerCase()
       : 'general';
-    const normalizedProficiencyLevel = ['beginner', 'elementary', 'intermediate'].includes(String(proficiency_level || '').trim().toLowerCase())
-      ? String(proficiency_level).trim().toLowerCase()
-      : 'beginner';
 
-    const user = await updateUserProfile(req.user.id, {
+    const payload = {
       name,
-      avatar_url,
       language_pair: normalizedLanguagePair,
       learning_goal: normalizedLearningGoal,
-      proficiency_level: normalizedProficiencyLevel,
-    });
+    };
+    if (avatar_url !== undefined) {
+      payload.avatar_url = avatar_url;
+    }
+    if (proficiency_level !== undefined && proficiency_level !== null && String(proficiency_level).trim() !== '') {
+      payload.proficiency_level = ['beginner', 'elementary', 'intermediate'].includes(String(proficiency_level).trim().toLowerCase())
+        ? String(proficiency_level).trim().toLowerCase()
+        : 'beginner';
+    }
+
+    const user = await updateUserProfile(req.user.id, payload);
 
     if (!user) {
       return res.status(404).json({ error: 'Пользователь не найден' });
@@ -314,11 +417,18 @@ router.get('/google/callback', async (req, res) => {
       return res.redirect(`${frontendUrl}/login?error=google_failed`);
     }
 
+    const picture =
+      userInfo.picture
+      || userInfo.picture_url
+      || userInfo.photo
+      || userInfo.avatar_url
+      || null;
+
     const user = await findOrCreateGoogleUser({
       googleId: userInfo.id,
       email: userInfo.email,
       name: userInfo.name || userInfo.email.split('@')[0],
-      avatarUrl: userInfo.picture || null,
+      avatarUrl: picture,
     });
 
     const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });

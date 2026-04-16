@@ -124,17 +124,80 @@ function buildReminder(weakestSkill) {
     return null;
   }
 
-  const skillNames = {
-    vocabulary: 'словарный запас',
-    grammar: 'грамматику',
-    listening: 'аудирование',
-    speaking: 'произношение',
-  };
-
   return {
-    title: 'Умная подсказка',
-    message: `Подтяните ${skillNames[weakestSkill.skillName] || weakestSkill.skillName}. Пройдите 2-минутный урок для закрепления!`,
+    skill_name: weakestSkill.skillName,
   };
+}
+
+const DEFAULT_SKILL_NAMES = ['vocabulary', 'grammar', 'listening', 'speaking'];
+
+async function ensureUserSkillsAndQuests(user) {
+  const { UserSkill, UserQuest } = await getMongoModels();
+  const foreign = buildLegacyAwareForeignCriteria('userId', 'legacyUserId', [user._id, user.legacyId]);
+  if (!foreign) {
+    return;
+  }
+
+  for (const skillName of DEFAULT_SKILL_NAMES) {
+    const exists = await UserSkill.findOne({ $and: [foreign, { skillName }] }).lean();
+    if (exists) {
+      continue;
+    }
+    try {
+      await UserSkill.create({
+        userId: user._id,
+        legacyUserId: user.legacyId ?? null,
+        skillName,
+        progress: 0,
+      });
+    } catch (err) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
+    }
+  }
+
+  const existingQuests = await UserQuest.find(foreign).lean();
+  const hasWords = existingQuests.some((q) => q.questType === 'words');
+  const hasLessons = existingQuests.some((q) => q.questType === 'lessons');
+
+  if (!hasWords) {
+    try {
+      await UserQuest.create({
+        userId: user._id,
+        legacyUserId: user.legacyId ?? null,
+        questName: 'words',
+        questType: 'words',
+        target: 5,
+        xpReward: 15,
+        current: 0,
+        completed: false,
+      });
+    } catch (err) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
+    }
+  }
+
+  if (!hasLessons) {
+    try {
+      await UserQuest.create({
+        userId: user._id,
+        legacyUserId: user.legacyId ?? null,
+        questName: 'lessons',
+        questType: 'lessons',
+        target: 3,
+        xpReward: 30,
+        current: 0,
+        completed: false,
+      });
+    } catch (err) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
+    }
+  }
 }
 
 async function getDashboardDataMongo(userId) {
@@ -160,6 +223,8 @@ async function getDashboardDataMongo(userId) {
       reminder: null,
     };
   }
+
+  await ensureUserSkillsAndQuests(user);
 
   const relatedUserCriteria = buildLegacyAwareForeignCriteria('userId', 'legacyUserId', [user._id, user.legacyId]);
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
