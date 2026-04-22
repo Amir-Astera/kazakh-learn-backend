@@ -119,14 +119,42 @@ function serializeQuest(quest, user) {
   };
 }
 
-function buildReminder(weakestSkill) {
-  if (!weakestSkill || (weakestSkill.progress || 0) >= 50) {
-    return null;
+function buildSmartReminder(weakestSkill, lastActivity, recentLessons, hasSpacedRepetitionDue) {
+  const now = Date.now();
+
+  // 1. Long absence: user hasn't studied in more than 3 days
+  if (lastActivity) {
+    const daysSinceLastLesson = (now - new Date(lastActivity).getTime()) / (1000 * 60 * 60 * 24);
+    if (daysSinceLastLesson >= 3) {
+      return {
+        type: 'long_absence',
+        days_away: Math.floor(daysSinceLastLesson),
+      };
+    }
+  } else {
+    // Never studied at all
+    return {
+      type: 'long_absence',
+      days_away: null,
+    };
   }
 
-  return {
-    skill_name: weakestSkill.skillName,
-  };
+  // 2. Spaced repetition: there are lessons completed >3 days ago that need review
+  if (hasSpacedRepetitionDue) {
+    return {
+      type: 'spaced_repetition',
+    };
+  }
+
+  // 3. Falling/weak skill progress: weakest skill below 40%
+  if (weakestSkill && (weakestSkill.progress || 0) < 40) {
+    return {
+      type: 'falling_progress',
+      skill_name: weakestSkill.skillName,
+    };
+  }
+
+  return null;
 }
 
 const DEFAULT_SKILL_NAMES = ['vocabulary', 'grammar', 'listening', 'speaking'];
@@ -229,7 +257,9 @@ async function getDashboardDataMongo(userId) {
   const relatedUserCriteria = buildLegacyAwareForeignCriteria('userId', 'legacyUserId', [user._id, user.legacyId]);
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-  const [skills, quests, recentLessons, weakestSkill] = await Promise.all([
+  const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+
+  const [skills, quests, recentLessons, weakestSkill, spacedRepetitionCount] = await Promise.all([
     UserSkill.find(relatedUserCriteria || {}).sort({ skillName: 1 }).lean(),
     UserQuest.find(relatedUserCriteria || {}).sort({ completed: 1, createdAt: -1 }).limit(5).lean(),
     UserLessonProgress.countDocuments({
@@ -237,14 +267,21 @@ async function getDashboardDataMongo(userId) {
       completedAt: { $gt: sevenDaysAgo },
     }),
     UserSkill.findOne(relatedUserCriteria || {}).sort({ progress: 1, skillName: 1 }).lean(),
+    UserLessonProgress.countDocuments({
+      ...(relatedUserCriteria || {}),
+      completed: true,
+      completedAt: { $lt: threeDaysAgo },
+    }),
   ]);
+
+  const hasSpacedRepetitionDue = spacedRepetitionCount > 0;
 
   return {
     user: serializeDashboardUser(user),
     skills: skills.map(serializeSkill),
     quests: quests.map((quest) => serializeQuest(quest, user)),
     recent_lessons: recentLessons,
-    reminder: buildReminder(weakestSkill),
+    reminder: buildSmartReminder(weakestSkill, user.lastActivity, recentLessons, hasSpacedRepetitionDue),
   };
 }
 

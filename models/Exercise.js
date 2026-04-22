@@ -6,10 +6,12 @@ const exerciseSchema = new Schema(
     lessonId: { type: Schema.Types.ObjectId, ref: 'Lesson', required: true },
     type: { type: String, enum: exerciseTypeValues, required: true },
     question: { type: String, required: true },
+    questionEn: { type: String, default: null },
     questionAudio: { type: String, default: null },
     options: { type: [String], default: null },
     correctAnswer: { type: String, required: true },
     explanation: { type: String, default: null },
+    explanationEn: { type: String, default: null },
     orderNum: { type: Number, required: true, min: 1 },
   },
   {

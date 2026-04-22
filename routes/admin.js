@@ -330,18 +330,18 @@ router.get('/exercises', async (req, res) => {
 });
 
 router.post('/exercises', async (req, res) => {
-  const { lesson_id, type, question, options, correct_answer, explanation, order_num } = req.body;
+  const { lesson_id, type, question, question_en, options, correct_answer, explanation, explanation_en, order_num } = req.body;
   try {
-    const exercise = await adminRepository.createExercise({ lesson_id, type, question, options, correct_answer, explanation, order_num });
+    const exercise = await adminRepository.createExercise({ lesson_id, type, question, question_en, options, correct_answer, explanation, explanation_en, order_num });
     if (!exercise) return res.status(404).json({ error: 'Урок не найден' });
     res.status(201).json(exercise);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 router.put('/exercises/:id', async (req, res) => {
-  const { lesson_id, type, question, options, correct_answer, explanation, order_num } = req.body;
+  const { lesson_id, type, question, question_en, options, correct_answer, explanation, explanation_en, order_num } = req.body;
   try {
-    const exercise = await adminRepository.updateExercise(req.params.id, { lesson_id, type, question, options, correct_answer, explanation, order_num });
+    const exercise = await adminRepository.updateExercise(req.params.id, { lesson_id, type, question, question_en, options, correct_answer, explanation, explanation_en, order_num });
     if (!exercise) return res.status(404).json({ error: 'Упражнение не найдено' });
     res.json(exercise);
   } catch (err) { res.status(500).json({ error: err.message }); }

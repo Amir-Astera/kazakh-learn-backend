@@ -330,10 +330,12 @@ function serializeExercise(exerciseDoc) {
     lesson_id: exerciseDoc.lessonId?.legacyId ?? String(exerciseDoc.lessonId?._id || exerciseDoc.lessonId),
     type: exerciseDoc.type,
     question: exerciseDoc.question,
+    question_en: exerciseDoc.questionEn || null,
     question_audio: exerciseDoc.questionAudio || null,
     options: exerciseDoc.options,
     correct_answer: exerciseDoc.correctAnswer,
     explanation: exerciseDoc.explanation,
+    explanation_en: exerciseDoc.explanationEn || null,
     order_num: exerciseDoc.orderNum,
   };
 }

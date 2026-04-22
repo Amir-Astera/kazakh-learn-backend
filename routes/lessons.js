@@ -66,6 +66,7 @@ router.post('/:lessonId/answer', authMiddleware, async (req, res) => {
       correct: isCorrect,
       correct_answer: exercise.correct_answer,
       explanation: exercise.explanation,
+      explanation_en: exercise.explanation_en,
     });
   } catch (err) {
     if (err?.code === 'UNIT_LOCKED') {
